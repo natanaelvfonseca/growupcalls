@@ -48,9 +48,9 @@ func TestEnsureContactBackfill(t *testing.T) {
 			// busca pelo telefone não acha nada; busca pelo @lid acha o contato sem número.
 			if q == lid {
 				writeTestJSON(w, map[string]any{"payload": []any{map[string]any{
-					"id":            42,
-					"identifier":    lid,
-					"phone_number":  nil,
+					"id":              42,
+					"identifier":      lid,
+					"phone_number":    nil,
 					"contact_inboxes": []any{map[string]any{"inbox": map[string]any{"id": 7}, "source_id": "src-42"}},
 				}}})
 				return
@@ -96,9 +96,9 @@ func TestEnsureContactNoBackfillWhenCorrect(t *testing.T) {
 		}
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/contacts/search") {
 			writeTestJSON(w, map[string]any{"payload": []any{map[string]any{
-				"id":            9,
-				"identifier":    "5567999998888@s.whatsapp.net",
-				"phone_number":  "+5567999998888",
+				"id":              9,
+				"identifier":      "5567999998888@s.whatsapp.net",
+				"phone_number":    "+5567999998888",
 				"contact_inboxes": []any{map[string]any{"inbox": map[string]any{"id": 7}, "source_id": "src-9"}},
 			}}})
 			return

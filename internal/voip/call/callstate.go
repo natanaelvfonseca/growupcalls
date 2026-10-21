@@ -2,8 +2,8 @@ package call
 
 import (
 	"fmt"
-	"time"
 	"growupcalls/internal/voip/core"
+	"time"
 )
 
 type CallStateData struct {

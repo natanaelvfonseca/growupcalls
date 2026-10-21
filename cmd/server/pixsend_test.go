@@ -10,13 +10,13 @@ func TestBuildPixBRCodeWithAmount(t *testing.T) {
 
 	for _, want := range []string{
 		"br.gov.bcb.pix",
-		"0114loja@growup.com", // chave (len 14)
-		"5303986",            // moeda BRL
-		"540549.90",          // valor: id54 len05 "49.90"
+		"0115loja@growup.com", // chave (len 15)
+		"5303986",             // moeda BRL
+		"540549.90",           // valor: id54 len05 "49.90"
 		"5802BR",
-		"5910LOJA GROWUP", // nome sem acento, maiúsculo (len 10)
-		"6009SAO PAULO",  // cidade sem acento (len 09)
-		"0509PEDIDO123",  // txid
+		"5911LOJA GROWUP", // nome sem acento, maiúsculo (len 11)
+		"6009SAO PAULO",   // cidade sem acento (len 09)
+		"0509PEDIDO123",   // txid
 	} {
 		if !strings.Contains(code, want) {
 			t.Errorf("faltou %q em %s", want, code)

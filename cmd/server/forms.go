@@ -114,7 +114,8 @@ func publicBaseURL(r *http.Request) string {
 
 // POST /api/sessions/{sid}/messages/form
 // {to, title?, body?, footer?, submitText?, buttonText?,
-//  fields:[{name,label,type,options[],placeholder,required}]}
+//
+//	fields:[{name,label,type,options[],placeholder,required}]}
 func (s *server) handleSendForm(w http.ResponseWriter, r *http.Request) {
 	sess := s.pairedSession(w, r.PathValue("sid"))
 	if sess == nil {

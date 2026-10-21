@@ -1,13 +1,13 @@
 package call
 
 import (
+	"growupcalls/internal/voip/core"
+	"growupcalls/internal/voip/media"
+	"growupcalls/internal/voip/transport"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
-	"growupcalls/internal/voip/core"
-	"growupcalls/internal/voip/media"
-	"growupcalls/internal/voip/transport"
 )
 
 // mediaDebugEnabled liga os logs de diagnóstico da mídia (recepção/decodificação

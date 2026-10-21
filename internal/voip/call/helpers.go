@@ -1,9 +1,9 @@
 package call
 
 import (
-	"strings"
 	"growupcalls/internal/voip/core"
 	"growupcalls/internal/voip/wanode"
+	"strings"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 )

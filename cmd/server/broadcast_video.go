@@ -23,8 +23,8 @@ const (
 	// Padrão conservador: o caminho gateway→RELAY→telefone costuma sustentar só
 	// ~50kbps fluido (o relay do WhatsApp é limitado; o app oficial usa P2P e por isso
 	// vai mais alto). Quem tiver rede de gateway melhor sobe via video_bitrate.
-	bcVideoMax      = 180
-	bcVideoFPS      = 15
+	bcVideoMax = 180
+	bcVideoFPS = 15
 	// 48k vídeo + 8k áudio (VideoCallAudioBitrate) = 56k, que é o total que fluía no
 	// canal compartilhado do relay. Subir isso trava (áudio+vídeo dividem a banda).
 	bcVideoBitrateK = 48
@@ -44,9 +44,9 @@ type vframe struct {
 
 // videoOpts controla a qualidade do vídeo do broadcast. Zero = usa o padrão (leve).
 type videoOpts struct {
-	MaxDim     int // lado maior em px (preserva proporção). Padrão bcVideoMax.
-	BitrateK   int // bitrate alvo em kbps. Padrão bcVideoBitrateK.
-	FPS        int // quadros/s. Padrão bcVideoFPS.
+	MaxDim   int // lado maior em px (preserva proporção). Padrão bcVideoMax.
+	BitrateK int // bitrate alvo em kbps. Padrão bcVideoBitrateK.
+	FPS      int // quadros/s. Padrão bcVideoFPS.
 }
 
 // normalize aplica padrões e limites seguros (evita estourar o canal da chamada).
@@ -186,6 +186,7 @@ func splitH264Frames(annexb []byte) []vframe {
 //     paralelo com o áudio (vídeo acompanha a ligação toda).
 //   - stop == nil && maxMs > 0: LOOP até maxMs.
 //   - stop == nil && maxMs <= 0: toca os frames UMA vez.
+//
 // Para também se a chamada cair. Devolve a duração tocada (ms).
 func (s *Session) pumpVideo(callID string, frames []vframe, fps int, stop <-chan struct{}, maxMs int) int {
 	if fps <= 0 {

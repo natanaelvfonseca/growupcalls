@@ -54,10 +54,10 @@ func TestValidateDigestAuthQop(t *testing.T) {
 
 func TestSipUserPart(t *testing.T) {
 	cases := map[string]string{
-		"5511999999999@s.whatsapp.net":      "5511999999999",
-		"5511999999999:12@s.whatsapp.net":   "5511999999999",
-		"5511999999999.0:3@s.whatsapp.net":  "5511999999999",
-		"5511999999999":                     "5511999999999",
+		"5511999999999@s.whatsapp.net":     "5511999999999",
+		"5511999999999:12@s.whatsapp.net":  "5511999999999",
+		"5511999999999.0:3@s.whatsapp.net": "5511999999999",
+		"5511999999999":                    "5511999999999",
 	}
 	for in, want := range cases {
 		if got := sipUserPart(in); got != want {

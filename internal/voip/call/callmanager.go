@@ -2,14 +2,14 @@ package call
 
 import (
 	"context"
-	"log/slog"
-	"sync"
 	callvideo "growupcalls/internal/voip/call/video"
 	"growupcalls/internal/voip/core"
 	"growupcalls/internal/voip/media"
 	"growupcalls/internal/voip/signaling"
 	"growupcalls/internal/voip/transport"
 	"growupcalls/internal/voip/wanode"
+	"log/slog"
+	"sync"
 
 	"go.mau.fi/whatsmeow/types"
 )
