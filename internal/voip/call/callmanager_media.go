@@ -1,0 +1,274 @@
+package call
+
+import (
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+	"growupcalls/internal/voip/core"
+	"growupcalls/internal/voip/media"
+	"growupcalls/internal/voip/transport"
+)
+
+// mediaDebugEnabled liga os logs de diagnóstico da mídia (recepção/decodificação
+// do áudio do peer). Desligado por padrão; o operador da stack habilita com
+// GROWUPCALLS_SIP_DEBUG=1 só quando precisa depurar.
+var mediaDebugEnabled = func() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GROWUPCALLS_SIP_DEBUG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
+func (m *CallManager) initCodec() {
+	if m.codec != nil {
+		return
+	}
+	opts := media.DefaultCodecOptions
+	// Áudio e vídeo DIVIDEM o mesmo canal do relay. Em chamada de VÍDEO, áudio alto
+	// (16k) rouba a banda do vídeo e trava. Então em vídeo usa áudio enxuto (sem FEC)
+	// pra sobrar banda; em chamada só de áudio mantém o 16k+FEC (voz nítida).
+	if m.currentCall != nil && m.currentCall.MediaType == core.CallMediaTypeVideo {
+		opts.Bitrate = media.VideoCallAudioBitrate
+		opts.FEC = false
+	}
+	codec, err := media.NewMLowCodec(opts)
+	if err != nil {
+		m.log.Warn("MLow codec unavailable — call will run signaling-only (no audio)", "err", err)
+		return
+	}
+	m.codec = codec
+	// Diagnóstico opt-in: loga quando o payload MLow vem embrulhado (container 0x92 de
+	// vídeo+DTX, ou RED) — confirma em produção qual camada está chegando.
+	if mediaDebugEnabled && media.MLowDebug == nil {
+		log := m.log
+		media.MLowDebug = func(msg string, kv ...any) { log.Info("mlow depacket", append([]any{"ev", msg}, kv...)...) }
+	}
+}
+
+func (m *CallManager) FeedCapturedPCM(data []float32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.codec == nil || len(data) == 0 {
+		return
+	}
+	m.captureBuf = append(m.captureBuf, data...)
+	if maxBuffered := m.codec.FrameSize() * 4; len(m.captureBuf) > maxBuffered {
+		m.captureBuf = m.captureBuf[len(m.captureBuf)-maxBuffered:]
+	}
+}
+
+func (m *CallManager) sendOpusFrameLocked(opus []byte) {
+	if m.rtpSession == nil || m.srtpSession == nil {
+		return
+	}
+	if !m.firstPacketSent {
+		// Ancora o relógio de mídia no 1º pacote de áudio (início REAL da mídia): o
+		// áudio começa em ts=0 aqui e o vídeo (1º frame) fica ancorado no MESMO instante.
+		// Sem isto, o relógio nascia no offer e o vídeo ficava adiantado do áudio pelo
+		// tempo de toque -> o receptor segurava o vídeo (congelava). Mesmo objeto do
+		// pipeline (SetClock), então o Reset vale pro vídeo também.
+		if m.mediaClock == nil {
+			m.mediaClock = media.NewMediaClock()
+		} else {
+			m.mediaClock.Reset()
+		}
+		m.rtpSession.SetTimestamp(0)
+	}
+	marker := !m.firstPacketSent
+	pkt := m.rtpSession.CreatePacketWithDuration(opus, m.codec.FrameSize(), marker)
+	if m.debeEnabled {
+		pkt.Header.Extension = true
+		pkt.Header.ExtensionProfile = 0xbede
+		pkt.Header.ExtensionData = nil
+	}
+	m.firstPacketSent = true
+
+	srtp, err := m.srtpSession.Protect(pkt)
+	if err != nil {
+		m.log.Debug("srtp protect error", "err", err)
+		return
+	}
+	m.relay.Broadcast(srtp)
+}
+
+func (m *CallManager) startMediaSendLoopLocked() {
+	if m.sendLoopStop != nil || m.codec == nil {
+		return
+	}
+	stop := make(chan struct{})
+	m.sendLoopStop = stop
+	frameSize := m.codec.FrameSize()
+	go func() {
+		ticker := time.NewTicker(60 * time.Millisecond)
+		defer ticker.Stop()
+		silence := make([]float32, frameSize)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			m.mu.Lock()
+			if m.codec == nil || m.rtpSession == nil || m.srtpSession == nil || !m.relay.HasConnection() {
+				m.mu.Unlock()
+				continue
+			}
+			frame := silence
+			switch {
+			case m.held:
+				// Em espera: não envia o mic do atendente. Toca música de espera
+				// (ou silêncio) para o interlocutor manter o leg vivo.
+				if m.mohEnabled {
+					frame = m.nextMohFrameLocked(frameSize)
+				}
+			case len(m.captureBuf) >= frameSize:
+				frame = make([]float32, frameSize)
+				copy(frame, m.captureBuf[:frameSize])
+				m.captureBuf = m.captureBuf[frameSize:]
+			}
+			if opus, err := m.codec.Encode(frame); err == nil {
+				m.sendOpusFrameLocked(opus)
+			}
+			m.mu.Unlock()
+		}
+	}()
+}
+
+// nextMohFrameLocked devolve o próximo quadro (frameSize amostras) do loop de música
+// de espera, avançando a posição. Deve ser chamado com m.mu travado.
+func (m *CallManager) nextMohFrameLocked(frameSize int) []float32 {
+	frame := make([]float32, frameSize)
+	if len(mohLoop) == 0 {
+		return frame
+	}
+	for i := 0; i < frameSize; i++ {
+		frame[i] = mohLoop[m.mohPos]
+		m.mohPos++
+		if m.mohPos >= len(mohLoop) {
+			m.mohPos = 0
+		}
+	}
+	return frame
+}
+
+func (m *CallManager) onRelayData(data []byte) {
+	if transport.IsStunPacket(data) {
+		return
+	}
+	if !transport.IsRtpPacket(data) {
+		return
+	}
+	if len(data) < 12 {
+		return
+	}
+	pt := data[1] & 0x7f
+	// diagnóstico (opt-in): confirma que CHEGA RTP do relay e com qual payload type/ssrc.
+	if mediaDebugEnabled {
+		n := atomic.AddUint64(&m.rtpRecvN, 1)
+		if n == 1 || n%500 == 0 {
+			m.mu.Lock()
+			self, sub := m.selfSsrc, m.subscribedSsrcForLog()
+			m.mu.Unlock()
+			m.log.Info("relay RTP recebido", "pkts", n, "pt", pt, "ssrc", media.RTPSsrc(data), "self_ssrc", self, "peer_ssrc_sub", sub)
+		}
+	}
+	switch pt {
+	case core.PayloadTypeWhatsAppOpus:
+		m.handleAudioRelayData(data)
+	case core.PayloadTypeWhatsAppH264:
+		m.video.HandleRelayData(data)
+	}
+}
+
+// subscribedSsrcForLog devolve o SSRC do peer que estamos assinando (p/ diagnóstico).
+func (m *CallManager) subscribedSsrcForLog() uint32 {
+	if len(m.peerSsrcs) > 0 {
+		return m.peerSsrcs[0]
+	}
+	return 0
+}
+
+func (m *CallManager) handleAudioRelayData(data []byte) {
+	m.mu.Lock()
+	if m.srtpSession == nil || m.codec == nil {
+		m.mu.Unlock()
+		return
+	}
+	ssrc := media.RTPSsrc(data)
+	if ssrc == m.selfSsrc {
+		m.mu.Unlock()
+		return
+	}
+	if !m.actualPeerSet {
+		m.actualPeerSet = true
+		if !containsSsrc(m.peerSsrcs, ssrc) {
+			m.peerSsrcs = []uint32{ssrc}
+			m.relay.SetSubscriptionSsrc(ssrc)
+			go m.relay.ResendSubscriptions()
+		}
+	}
+	srtp := m.srtpSession
+	codec := m.codec
+	held := m.held
+	m.mu.Unlock()
+
+	pkt, err := srtp.Unprotect(data)
+	if err != nil {
+		if mediaDebugEnabled {
+			if e := atomic.AddUint64(&m.unprotectErrN, 1); e == 1 || e%200 == 0 {
+				m.log.Info("srtp unprotect falhou (áudio do peer não decodificado)", "erros", e, "err", err)
+			}
+		}
+		return
+	}
+	if len(pkt.Payload) == 0 {
+		return
+	}
+	pcm, err := codec.Decode(pkt.Payload)
+	if err != nil || len(pcm) == 0 {
+		return
+	}
+	// diagnóstico (opt-in): confirma que o áudio do peer chega e é decodificado do relay.
+	if mediaDebugEnabled {
+		n := atomic.AddUint64(&m.recvDiagN, 1)
+		if n == 1 || n%500 == 0 {
+			m.log.Info("relay peer audio decodificado", "pkts", n, "held", held, "has_cb", m.OnPeerAudio != nil, "samples", len(pcm))
+		}
+	}
+	if held {
+		// Em espera: não encaminha o áudio do peer ao navegador do atendente.
+		return
+	}
+	if m.OnPeerAudio != nil {
+		m.OnPeerAudio(m.alignPeerAudio(pkt.Header.Timestamp, pcm))
+	}
+}
+
+func (m *CallManager) alignPeerAudio(ts uint32, pcm []float32) []float32 {
+	const maxGapSamples = 8000
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	origLen := uint64(len(pcm))
+	if !m.audioTimelineSet {
+		m.audioTimelineSet = true
+		m.audioBaseTs = ts
+		m.audioPlayedSamples = origLen
+		return pcm
+	}
+	target := uint64(ts - m.audioBaseTs)
+	gap := int64(target) - int64(m.audioPlayedSamples)
+	if gap < 0 || gap > maxGapSamples {
+		m.audioBaseTs = ts
+		m.audioPlayedSamples = origLen
+		return pcm
+	}
+	if gap > 0 {
+		padded := make([]float32, int(gap)+int(origLen))
+		copy(padded[int(gap):], pcm)
+		pcm = padded
+	}
+	m.audioPlayedSamples = target + origLen
+	return pcm
+}

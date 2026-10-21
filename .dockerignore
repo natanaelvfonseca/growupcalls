@@ -1,0 +1,10 @@
+.git
+client/node_modules
+client/dist
+growupcalls
+growupcalls-mlow
+*.db
+*.db-*
+server.log
+caddy.log
+Caddyfile

@@ -1,0 +1,224 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+)
+
+type sessionRow struct {
+	ID            string
+	Name          string
+	JID           string
+	LastJID       string
+	Webhook       string
+	WebhookSecret string
+	WebhookEvents string // CSV dos tipos de evento; vazio = todos
+	Chatwoot      string
+	Recording     bool
+	Proxy         string
+	SIPUser       string
+	SIPPass       string
+	// Modelo 2 (UAC): esta sessão se REGISTRA num PBX externo.
+	SIPExtEnabled bool
+	SIPExtHost    string
+	SIPExtPort    int
+	SIPExtUser    string
+	SIPExtPass    string
+	SIPExtDest    string // ramal/número no PBX p/ tocar chamadas recebidas do WhatsApp (opcional)
+	SIPExtProxy   string // outbound proxy (host[:porta]); vazio = usa host
+}
+
+type sessionStore struct{ db *sql.DB }
+
+// newSessionStore cria a tabela de config das sessões no banco PRINCIPAL.
+// (O store do whatsmeow de cada sessão fica em um banco separado — ver db.go.)
+func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sessions (
+		id         TEXT PRIMARY KEY,
+		name       TEXT NOT NULL,
+		jid        TEXT,
+		webhook    TEXT,
+		chatwoot   TEXT,
+		sip_user   TEXT,
+		sip_pass   TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	// migração p/ bancos antigos (Postgres aceita IF NOT EXISTS no ADD COLUMN)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS webhook TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS webhook_secret TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS webhook_events TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS chatwoot TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_user TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_pass TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS recording BOOLEAN NOT NULL DEFAULT false`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS proxy TEXT`)
+	// último número conectado — sobrevive à desconexão p/ o painel exibir "último número"
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_jid TEXT`)
+	// Modelo 2 (SIP UAC): registrar esta sessão num PBX externo.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_enabled BOOLEAN NOT NULL DEFAULT false`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_host TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_port INT NOT NULL DEFAULT 5060`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_user TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_pass TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_dest TEXT`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sip_ext_proxy TEXT`)
+
+	// Histórico de mensagens (para as rotas de chats/messages).
+	// O whatsmeow não persiste histórico; guardamos aqui o que passa pela sessão.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS messages (
+		session_id TEXT NOT NULL,
+		chat_jid   TEXT NOT NULL,
+		sender_jid TEXT NOT NULL,
+		msg_id     TEXT NOT NULL,
+		from_me    BOOLEAN NOT NULL,
+		ts         BIGINT NOT NULL,
+		type       TEXT NOT NULL,
+		body       TEXT,
+		raw        JSONB,
+		PRIMARY KEY (session_id, chat_jid, msg_id)
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (session_id, chat_jid, ts DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_session_ts ON messages (session_id, ts DESC)`)
+
+	// Mensagens agendadas (send_at). A mensagem já vem montada (mídia já subida) e
+	// serializada em protojson; o worker (scheduled.go) envia na hora marcada.
+	// Sobrevive a restart.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scheduled_messages (
+		id         BIGSERIAL PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		to_jid     TEXT NOT NULL,
+		msg        JSONB NOT NULL,
+		send_at    BIGINT NOT NULL,
+		status     TEXT NOT NULL DEFAULT 'pending',
+		last_error TEXT,
+		created_at BIGINT NOT NULL
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS scheduled_due ON scheduled_messages (status, send_at)`)
+
+	// Fila de reentrega das entradas do Chatwoot (ver chatwoot_outbox.go). Sobrevive
+	// a restart do GrowupCalls: se o Chatwoot cai, a mensagem fica aqui e é reentregue
+	// com backoff em vez de se perder.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS chatwoot_outbox (
+		id         BIGSERIAL PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		source_id  TEXT NOT NULL,
+		payload    JSONB NOT NULL,
+		attempts   INT NOT NULL DEFAULT 0,
+		next_at    BIGINT NOT NULL,
+		created_at BIGINT NOT NULL,
+		last_error TEXT,
+		dead       BOOLEAN NOT NULL DEFAULT false,
+		UNIQUE (session_id, source_id)
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS chatwoot_outbox_due ON chatwoot_outbox (dead, next_at)`)
+
+	return &sessionStore{db: db}, nil
+}
+
+// genSIPCredential gera um token hex aleatório para usuário/senha SIP.
+func genSIPCredential(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// generateRandomString devolve uma string hex aleatória com n caracteres.
+func generateRandomString(n int) string {
+	b := make([]byte, (n+1)/2)
+	rand.Read(b)
+	return hex.EncodeToString(b)[:n]
+}
+
+func newSessionID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (s *sessionStore) list(ctx context.Context) ([]sessionRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, COALESCE(jid, ''), COALESCE(last_jid, ''), COALESCE(webhook, ''), COALESCE(webhook_secret, ''), COALESCE(webhook_events, ''), COALESCE(chatwoot, ''), COALESCE(recording, false), COALESCE(proxy, ''), COALESCE(sip_user, ''), COALESCE(sip_pass, ''), COALESCE(sip_ext_enabled, false), COALESCE(sip_ext_host, ''), COALESCE(sip_ext_port, 5060), COALESCE(sip_ext_user, ''), COALESCE(sip_ext_pass, ''), COALESCE(sip_ext_dest, ''), COALESCE(sip_ext_proxy, '') FROM sessions ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sessionRow
+	for rows.Next() {
+		var r sessionRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.JID, &r.LastJID, &r.Webhook, &r.WebhookSecret, &r.WebhookEvents, &r.Chatwoot, &r.Recording, &r.Proxy, &r.SIPUser, &r.SIPPass, &r.SIPExtEnabled, &r.SIPExtHost, &r.SIPExtPort, &r.SIPExtUser, &r.SIPExtPass, &r.SIPExtDest, &r.SIPExtProxy); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// insert cria a sessão já com credenciais SIP geradas e as devolve.
+func (s *sessionStore) insert(ctx context.Context, id, name string) (sipUser, sipPass string, err error) {
+	sipUser = "wa_" + genSIPCredential(4)
+	sipPass = genSIPCredential(12)
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, name, jid, sip_user, sip_pass) VALUES ($1, $2, NULL, $3, $4)`,
+		id, name, sipUser, sipPass)
+	if err != nil {
+		return "", "", err
+	}
+	return sipUser, sipPass, nil
+}
+
+func (s *sessionStore) setSIP(ctx context.Context, id, sipUser, sipPass string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET sip_user = $1, sip_pass = $2 WHERE id = $3`, sipUser, sipPass, id)
+	return err
+}
+
+// setSIPExt persiste a config do modelo 2 (registro em PBX externo).
+func (s *sessionStore) setSIPExt(ctx context.Context, id string, enabled bool, host string, port int, user, pass, dest, proxy string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET sip_ext_enabled = $1, sip_ext_host = $2, sip_ext_port = $3, sip_ext_user = $4, sip_ext_pass = $5, sip_ext_dest = $6, sip_ext_proxy = $7 WHERE id = $8`,
+		enabled, host, port, user, pass, dest, proxy, id)
+	return err
+}
+
+func (s *sessionStore) setJID(ctx context.Context, id, jid string) error {
+	// ao conectar (jid != ''), atualiza também o last_jid; ao desconectar (jid=''),
+	// preserva o last_jid para o painel mostrar o último número.
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET jid = $1, last_jid = CASE WHEN $1 <> '' THEN $1 ELSE last_jid END WHERE id = $2`, jid, id)
+	return err
+}
+
+func (s *sessionStore) setWebhook(ctx context.Context, id, url, secret, events string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET webhook = $1, webhook_secret = $2, webhook_events = $3 WHERE id = $4`, url, secret, events, id)
+	return err
+}
+
+func (s *sessionStore) setChatwoot(ctx context.Context, id, cfgJSON string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET chatwoot = $1 WHERE id = $2`, cfgJSON, id)
+	return err
+}
+
+func (s *sessionStore) setRecording(ctx context.Context, id string, on bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET recording = $1 WHERE id = $2`, on, id)
+	return err
+}
+
+func (s *sessionStore) setProxy(ctx context.Context, id, proxyURL string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET proxy = $1 WHERE id = $2`, proxyURL, id)
+	return err
+}
+
+func (s *sessionStore) delete(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	return err
+}

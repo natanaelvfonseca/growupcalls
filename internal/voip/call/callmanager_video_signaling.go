@@ -1,0 +1,251 @@
+package call
+
+import (
+	"context"
+
+	"growupcalls/internal/voip/core"
+	"growupcalls/internal/voip/signaling"
+	"growupcalls/internal/voip/wanode"
+
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
+)
+
+// videoPeerLocked resolve o destino das stanzas de vídeo mid-call: o dispositivo
+// que aceitou a chamada quando conhecido, senão o JID base do peer. Requer m.mu.
+func (m *CallManager) videoPeerLocked() types.JID {
+	if m.acceptedByJid != "" {
+		return wanode.MustJID(m.acceptedByJid)
+	}
+	return wanode.MustJID(m.currentCall.PeerJid)
+}
+
+// notePeerVideoActive marca a câmera do peer como ligada assim que chegam frames
+// de vídeo de verdade — sem depender da stanza <video state=1>. O WhatsApp nem
+// sempre entrega esse sinal tipado (ex.: vídeo desde o início da chamada, ou o
+// stanza cai fora do caminho tratado), e sem PeerVideoOn=true o painel não anexa o
+// <video> do peer e a câmera do cliente fica PRETA mesmo com os frames chegando.
+// Idempotente: só emite na transição off->on.
+func (m *CallManager) notePeerVideoActive() {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() || call.StateData.PeerVideoOn {
+		m.mu.Unlock()
+		return
+	}
+	call.StateData.PeerVideoOn = true
+	call.MediaType = core.CallMediaTypeVideo
+	cb := m.OnVideoStateChanged
+	c := call
+	m.mu.Unlock()
+	m.log.Info("peer video ativo (frames recebidos)", "call_id", c.CallID)
+	if cb != nil {
+		cb(c)
+	}
+}
+
+// notePeerVideoOrientation guarda a orientação da câmera do peer (0..3, vinda da
+// extensão RTP) e avisa a UI (via OnVideoStateChanged) pra girar o vídeo sozinha.
+func (m *CallManager) notePeerVideoOrientation(o int) {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() || call.StateData.PeerVideoOrientation == o {
+		m.mu.Unlock()
+		return
+	}
+	call.StateData.PeerVideoOrientation = o
+	cb := m.OnVideoStateChanged
+	c := call
+	m.mu.Unlock()
+	m.log.Info("peer video orientation", "call_id", c.CallID, "orientation", o)
+	if cb != nil {
+		cb(c)
+	}
+}
+
+// HandleVideoState trata uma stanza <call><video state=N/></call> recebida no meio
+// de uma chamada ativa: manda o ack obrigatório, atualiza o estado de vídeo e
+// dispara os callbacks para a UI. Quando o peer aceita um upgrade que pedimos,
+// confirmamos automaticamente com <video state=1> (câmera ligada).
+func (m *CallManager) HandleVideoState(ctx context.Context, node *waBinary.Node) {
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil || info.Tag != "video" {
+		return
+	}
+	// O ack tipado é obrigatório: sem ele o WhatsApp interrompe a negociação.
+	if ack, ok := signaling.BuildVideoAck(node); ok {
+		_ = m.sock.SendNode(ctx, ack)
+	}
+	state := wanode.AttrInt(info.InnerNode.Attrs, "state", -1)
+
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || call.CallID != info.CallID || !call.IsActive() {
+		m.mu.Unlock()
+		return
+	}
+	sd := &call.StateData
+	var upgradeRequested, sendEnabled bool
+	switch state {
+	case signaling.VideoStateUpgradeRequest, signaling.VideoStateUpgradeRequestV2:
+		sd.VideoUpgradeIncoming = true
+		upgradeRequested = true
+	case signaling.VideoStateUpgradeAccept:
+		// O peer aceitou o upgrade que pedimos: ligamos a câmera e confirmamos.
+		sd.VideoUpgradeOutgoing = false
+		sd.VideoOff = false
+		call.MediaType = core.CallMediaTypeVideo
+		sendEnabled = true
+	case signaling.VideoStateUpgradeReject, signaling.VideoStateUpgradeCancel:
+		sd.VideoUpgradeIncoming = false
+		sd.VideoUpgradeOutgoing = false
+	case signaling.VideoStateEnabled:
+		sd.PeerVideoOn = true
+		call.MediaType = core.CallMediaTypeVideo
+	case signaling.VideoStateStopped, signaling.VideoStateDisabled:
+		sd.PeerVideoOn = false
+	}
+	peer := m.videoPeerLocked()
+	creator := wanode.MustJID(call.CallCreator)
+	callID := call.CallID
+	onReq := m.OnVideoUpgradeRequest
+	onChg := m.OnVideoStateChanged
+	c := call
+	m.mu.Unlock()
+
+	if sendEnabled {
+		orientation := 0
+		_ = m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+			CallID: callID, To: peer, CallCreator: creator,
+			State: signaling.VideoStateEnabled, DeviceOrientation: &orientation,
+		}))
+	}
+	if upgradeRequested && onReq != nil {
+		onReq(c)
+	}
+	if onChg != nil {
+		onChg(c)
+	}
+	// O WhatsApp avisa a rotação do aparelho no meio da chamada por este stanza
+	// (device_orientation), não só pelos bits CVO do RTP.
+	if o := wanode.AttrInt(info.InnerNode.Attrs, "device_orientation", -1); o >= 0 && o <= 3 {
+		m.notePeerVideoOrientation(o)
+	}
+	m.log.Info("peer video state", "call_id", callID, "state", state)
+}
+
+// RequestVideoUpgrade liga a nossa câmera mid-call. Se a chamada ainda é só
+// áudio, pede o upgrade áudio->vídeo (state=11) — a negociação completa. Mas se a
+// chamada JÁ é vídeo (o upgrade já rolou antes e o usuário só desligou/religou a
+// câmera, ou a chamada nasceu em vídeo), religar é apenas um <video state=1>
+// (enabled): um segundo pedido de upgrade NÃO faz o peer reativar o vídeo, que era
+// o bug de "vídeo não religa" no WhatsApp do cliente.
+func (m *CallManager) RequestVideoUpgrade(ctx context.Context) error {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() {
+		m.mu.Unlock()
+		return &CallError{"no active call to upgrade"}
+	}
+	alreadyVideo := call.MediaType == core.CallMediaTypeVideo
+	if alreadyVideo {
+		call.StateData.VideoOff = false
+	} else {
+		call.StateData.VideoUpgradeOutgoing = true
+	}
+	peer := m.videoPeerLocked()
+	creator := wanode.MustJID(call.CallCreator)
+	callID := call.CallID
+	m.emitState()
+	m.mu.Unlock()
+
+	orientation := 0
+	if alreadyVideo {
+		// Reativa a câmera numa chamada que já é vídeo.
+		return m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+			CallID: callID, To: peer, CallCreator: creator,
+			State: signaling.VideoStateEnabled, DeviceOrientation: &orientation,
+		}))
+	}
+	return m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+		CallID: callID, To: peer, CallCreator: creator,
+		State: signaling.VideoStateUpgradeRequestV2, Dec: signaling.VideoDecRequest,
+		DeviceOrientation: &orientation,
+	}))
+}
+
+// AcceptVideoUpgrade aceita um pedido de upgrade recebido: responde state=4 e, em
+// seguida, state=1 (câmera ligada).
+func (m *CallManager) AcceptVideoUpgrade(ctx context.Context) error {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() {
+		m.mu.Unlock()
+		return &CallError{"no active call to upgrade"}
+	}
+	call.StateData.VideoUpgradeIncoming = false
+	call.StateData.VideoOff = false
+	call.MediaType = core.CallMediaTypeVideo
+	peer := m.videoPeerLocked()
+	creator := wanode.MustJID(call.CallCreator)
+	callID := call.CallID
+	m.emitState()
+	m.mu.Unlock()
+
+	accept := signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+		CallID: callID, To: peer, CallCreator: creator,
+		State: signaling.VideoStateUpgradeAccept, Dec: signaling.VideoDecAccept,
+	})
+	if err := m.sock.SendNode(ctx, accept); err != nil {
+		return err
+	}
+	orientation := 0
+	return m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+		CallID: callID, To: peer, CallCreator: creator,
+		State: signaling.VideoStateEnabled, DeviceOrientation: &orientation,
+	}))
+}
+
+// RejectVideoUpgrade recusa um pedido de upgrade recebido (state=5).
+func (m *CallManager) RejectVideoUpgrade(ctx context.Context) error {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() {
+		m.mu.Unlock()
+		return &CallError{"no active call"}
+	}
+	call.StateData.VideoUpgradeIncoming = false
+	peer := m.videoPeerLocked()
+	creator := wanode.MustJID(call.CallCreator)
+	callID := call.CallID
+	m.emitState()
+	m.mu.Unlock()
+
+	return m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+		CallID: callID, To: peer, CallCreator: creator,
+		State: signaling.VideoStateUpgradeReject,
+	}))
+}
+
+// StopVideo desliga o nosso vídeo mid-call (downgrade para áudio, state=6).
+func (m *CallManager) StopVideo(ctx context.Context) error {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || !call.IsActive() {
+		m.mu.Unlock()
+		return &CallError{"no active call"}
+	}
+	call.StateData.VideoOff = true
+	call.StateData.VideoUpgradeOutgoing = false
+	peer := m.videoPeerLocked()
+	creator := wanode.MustJID(call.CallCreator)
+	callID := call.CallID
+	m.emitState()
+	m.mu.Unlock()
+
+	orientation := 0
+	return m.sock.SendNode(ctx, signaling.BuildVideoStateStanza(signaling.VideoStateParams{
+		CallID: callID, To: peer, CallCreator: creator,
+		State: signaling.VideoStateStopped, DeviceOrientation: &orientation,
+	}))
+}

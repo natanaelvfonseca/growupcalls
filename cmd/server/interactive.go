@@ -1,0 +1,430 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
+)
+
+// Mensagens interativas (botões/listas) via NATIVE FLOW. Para ENTREGAR em número
+// não-oficial (whatsmeow) são necessárias 3 coisas que o whatsmeow não faz sozinho
+// (referência: implementação do usuário em button.js / Baileys):
+//   1. messageContextInfo.messageSecret (32 bytes aleatórios) na mensagem;
+//   2. o stanza extra <biz><interactive type="native_flow" v="1"><native_flow
+//      v="9" name="mixed"/></interactive></biz> anexado no envio (AdditionalNodes);
+//   3. reply buttons vão dentro de documentWithCaptionMessage; CTA (url/copy/call/
+//      quick_reply) vão em interactiveMessage direto; lista em single_select.
+// NÃO mandar <bot biz_bot="1"> em conta pessoal (o destinatário dropa).
+
+func newMessageSecret() []byte {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return b
+}
+
+// bizNativeFlowNode é o stanza <biz> obrigatório p/ o WhatsApp renderizar o nativeFlow.
+func bizNativeFlowNode() waBinary.Node {
+	return waBinary.Node{
+		Tag: "biz",
+		Content: []waBinary.Node{{
+			Tag:   "interactive",
+			Attrs: waBinary.Attrs{"type": "native_flow", "v": "1"},
+			Content: []waBinary.Node{{
+				Tag:   "native_flow",
+				Attrs: waBinary.Attrs{"v": "9", "name": "mixed"},
+			}},
+		}},
+	}
+}
+
+// sendNativeFlow envia a mensagem interativa com o stanza <biz> anexado + resolução
+// de LID (9º dígito) + id idempotente, e escreve a resposta HTTP.
+func (s *server) sendNativeFlow(sess *Session, w http.ResponseWriter, r *http.Request, jid types.JID, msg *waE2E.Message) {
+	nodes := []waBinary.Node{bizNativeFlowNode()}
+	extra := whatsmeow.SendRequestExtra{AdditionalNodes: &nodes}
+	if id := messageIDFromRequest(r); id != "" {
+		extra.ID = types.MessageID(id)
+	}
+	resp, err := sess.sendResolvingLID(r.Context(), jid, msg, extra)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	sess.recordOutgoing(jid, resp.ID, resp.Timestamp.UnixMilli(), msg)
+	writeJSON(w, http.StatusOK, map[string]any{"id": resp.ID, "to": jid.String(), "timestamp": resp.Timestamp.UnixMilli()})
+}
+
+// POST /api/sessions/{sid}/messages/buttons {to, text, footer?, buttons:[{id,text}]}
+// Reply buttons (máx 3). Vão em ButtonsMessage dentro de documentWithCaptionMessage.
+func (s *server) handleSendButtons(w http.ResponseWriter, r *http.Request) {
+	sess := s.pairedSession(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	var b struct {
+		To      string `json:"to"`
+		Text    string `json:"text"`
+		Footer  string `json:"footer"`
+		Buttons []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"buttons"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || strings.TrimSpace(b.To) == "" || len(b.Buttons) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to, text e buttons obrigatórios"})
+		return
+	}
+	jid, err := resolveRecipient(b.To)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// Em GRUPO, reply buttons postariam a escolha pro grupo inteiro ("marca geral").
+	// Converte pra interactiveMessage com cta_url wa.me (abre PV, não posta no grupo).
+	if jid.Server == types.GroupServer {
+		nbtns := make([]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton, 0, len(b.Buttons))
+		for i, bt := range b.Buttons {
+			name, params := sess.groupSafeButton(true, "quick_reply", bt.Text, "", bt.ID, "", "", i)
+			nbtns = append(nbtns, &waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+				Name: proto.String(name), ButtonParamsJSON: proto.String(params),
+			})
+		}
+		msg := &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{
+				Body:   &waE2E.InteractiveMessage_Body{Text: proto.String(b.Text)},
+				Footer: &waE2E.InteractiveMessage_Footer{Text: proto.String(b.Footer)},
+				InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+					NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+						Buttons: nbtns, MessageParamsJSON: proto.String(""), MessageVersion: proto.Int32(1),
+					},
+				},
+			},
+			MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: newMessageSecret()},
+		}
+		s.sendNativeFlow(sess, w, r, jid, msg)
+		return
+	}
+	btns := make([]*waE2E.ButtonsMessage_Button, 0, len(b.Buttons))
+	for i, bt := range b.Buttons {
+		id := bt.ID
+		if id == "" {
+			id = "btn_" + itoa(i+1)
+		}
+		typ := waE2E.ButtonsMessage_Button_RESPONSE
+		btns = append(btns, &waE2E.ButtonsMessage_Button{
+			ButtonID:   proto.String(id),
+			ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{DisplayText: proto.String(bt.Text)},
+			Type:       &typ,
+		})
+	}
+	ht := waE2E.ButtonsMessage_EMPTY
+	msg := &waE2E.Message{
+		DocumentWithCaptionMessage: &waE2E.FutureProofMessage{Message: &waE2E.Message{
+			ButtonsMessage: &waE2E.ButtonsMessage{
+				ContentText: proto.String(b.Text),
+				FooterText:  proto.String(b.Footer),
+				HeaderType:  &ht,
+				Buttons:     btns,
+			},
+		}},
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: newMessageSecret()},
+	}
+	s.sendNativeFlow(sess, w, r, jid, msg)
+}
+
+// POST /api/sessions/{sid}/messages/interactive
+// {to, body, footer?, buttons:[{type, displayText, url?, id?, copyCode?, phoneNumber?}]}
+// type ∈ quick_reply | cta_url | cta_copy | cta_call
+func (s *server) handleSendInteractive(w http.ResponseWriter, r *http.Request) {
+	sess := s.pairedSession(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	var b struct {
+		To      string `json:"to"`
+		Body    string `json:"body"`
+		Footer  string `json:"footer"`
+		Buttons []struct {
+			Type        string `json:"type"`
+			DisplayText string `json:"displayText"`
+			URL         string `json:"url"`
+			ID          string `json:"id"`
+			CopyCode    string `json:"copyCode"`
+			PhoneNumber string `json:"phoneNumber"`
+		} `json:"buttons"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || strings.TrimSpace(b.To) == "" || len(b.Buttons) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to, body e buttons obrigatórios"})
+		return
+	}
+	jid, err := resolveRecipient(b.To)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	isGroup := jid.Server == types.GroupServer
+	nbtns := make([]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton, 0, len(b.Buttons))
+	for i, bt := range b.Buttons {
+		name, params := sess.groupSafeButton(isGroup, bt.Type, bt.DisplayText, bt.URL, bt.ID, bt.CopyCode, bt.PhoneNumber, i)
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "type inválido (quick_reply|cta_url|cta_copy|cta_call)"})
+			return
+		}
+		nbtns = append(nbtns, &waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			Name: proto.String(name), ButtonParamsJSON: proto.String(params),
+		})
+	}
+	msg := &waE2E.Message{
+		InteractiveMessage: &waE2E.InteractiveMessage{
+			Body:   &waE2E.InteractiveMessage_Body{Text: proto.String(b.Body)},
+			Footer: &waE2E.InteractiveMessage_Footer{Text: proto.String(b.Footer)},
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: nbtns, MessageParamsJSON: proto.String(""), MessageVersion: proto.Int32(1),
+				},
+			},
+		},
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: newMessageSecret()},
+	}
+	s.sendNativeFlow(sess, w, r, jid, msg)
+}
+
+// POST /api/sessions/{sid}/messages/list
+// {to, body, footer?, buttonText, sections:[{title, rows:[{id,title,description}]}]}
+// Lista (single_select nativeFlow).
+func (s *server) handleSendList(w http.ResponseWriter, r *http.Request) {
+	sess := s.pairedSession(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	var b struct {
+		To         string `json:"to"`
+		Body       string `json:"body"`
+		Text       string `json:"text"` // alias de body
+		Footer     string `json:"footer"`
+		ButtonText string `json:"buttonText"`
+		Sections   []struct {
+			Title string `json:"title"`
+			Rows  []struct {
+				ID          string `json:"id"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
+			} `json:"rows"`
+		} `json:"sections"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || strings.TrimSpace(b.To) == "" || len(b.Sections) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to, buttonText e sections obrigatórios"})
+		return
+	}
+	jid, err := resolveRecipient(b.To)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// monta buttonParamsJson do single_select: {title, sections:[{title, rows:[{header,title,description,id}]}]}
+	type lrow struct {
+		Header      string `json:"header"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		ID          string `json:"id"`
+	}
+	type lsec struct {
+		Title string `json:"title"`
+		Rows  []lrow `json:"rows"`
+	}
+	secs := make([]lsec, 0, len(b.Sections))
+	for _, sec := range b.Sections {
+		rows := make([]lrow, 0, len(sec.Rows))
+		for i, rw := range sec.Rows {
+			id := rw.ID
+			if id == "" {
+				id = "row_" + itoa(i+1)
+			}
+			rows = append(rows, lrow{Title: rw.Title, Description: rw.Description, ID: id})
+		}
+		secs = append(secs, lsec{Title: sec.Title, Rows: rows})
+	}
+	btnText := b.ButtonText
+	if btnText == "" {
+		btnText = "Ver opções"
+	}
+	params, _ := json.Marshal(map[string]any{"title": btnText, "sections": secs})
+	body := b.Body
+	if body == "" {
+		body = b.Text
+	}
+	msg := &waE2E.Message{
+		InteractiveMessage: &waE2E.InteractiveMessage{
+			Body:   &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
+			Footer: &waE2E.InteractiveMessage_Footer{Text: proto.String(b.Footer)},
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{{
+						Name: proto.String("single_select"), ButtonParamsJSON: proto.String(string(params)),
+					}},
+					MessageParamsJSON: proto.String(""), MessageVersion: proto.Int32(1),
+				},
+			},
+		},
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: newMessageSecret()},
+	}
+	s.sendNativeFlow(sess, w, r, jid, msg)
+}
+
+// POST /api/sessions/{sid}/messages/carousel
+// {to, body, cards:[{imageUrl|base64, title?, body, buttons:[{type,displayText,url?,id?,copyCode?,phoneNumber?}]}]}
+// Carrossel de cards (imagem + texto + botões nativeFlow). Mesmo envelope <biz>.
+func (s *server) handleSendCarousel(w http.ResponseWriter, r *http.Request) {
+	sess := s.pairedSession(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	var b struct {
+		To    string `json:"to"`
+		Body  string `json:"body"`
+		Cards []struct {
+			ImageURL string `json:"imageUrl"`
+			Base64   string `json:"base64"`
+			Title    string `json:"title"`
+			Body     string `json:"body"`
+			Buttons  []struct {
+				Type        string `json:"type"`
+				DisplayText string `json:"displayText"`
+				URL         string `json:"url"`
+				ID          string `json:"id"`
+				CopyCode    string `json:"copyCode"`
+				PhoneNumber string `json:"phoneNumber"`
+			} `json:"buttons"`
+		} `json:"cards"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || strings.TrimSpace(b.To) == "" || len(b.Cards) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to e cards obrigatórios"})
+		return
+	}
+	jid, err := resolveRecipient(b.To)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	isGroup := jid.Server == types.GroupServer
+	cards := make([]*waE2E.InteractiveMessage, 0, len(b.Cards))
+	for _, c := range b.Cards {
+		up, ok := s.uploadMedia(sess, w, r, c.Base64, c.ImageURL, whatsmeow.MediaImage)
+		if !ok {
+			return // uploadMedia já respondeu o erro
+		}
+		img := &waE2E.ImageMessage{
+			Mimetype: proto.String("image/jpeg"),
+			URL:      &up.URL, DirectPath: &up.DirectPath, MediaKey: up.MediaKey,
+			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(up.FileLength),
+		}
+		nbtns := make([]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton, 0, len(c.Buttons))
+		for i, bt := range c.Buttons {
+			name, params := sess.groupSafeButton(isGroup, bt.Type, bt.DisplayText, bt.URL, bt.ID, bt.CopyCode, bt.PhoneNumber, i)
+			if name == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "type de botão inválido no card"})
+				return
+			}
+			nbtns = append(nbtns, &waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+				Name: proto.String(name), ButtonParamsJSON: proto.String(params),
+			})
+		}
+		cards = append(cards, &waE2E.InteractiveMessage{
+			Header: &waE2E.InteractiveMessage_Header{
+				Title:              proto.String(c.Title),
+				HasMediaAttachment: proto.Bool(true),
+				Media:              &waE2E.InteractiveMessage_Header_ImageMessage{ImageMessage: img},
+			},
+			Body: &waE2E.InteractiveMessage_Body{Text: proto.String(c.Body)},
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: nbtns, MessageParamsJSON: proto.String(""), MessageVersion: proto.Int32(1),
+				},
+			},
+		})
+	}
+	msg := &waE2E.Message{
+		InteractiveMessage: &waE2E.InteractiveMessage{
+			Body: &waE2E.InteractiveMessage_Body{Text: proto.String(b.Body)},
+			InteractiveMessage: &waE2E.InteractiveMessage_CarouselMessage_{
+				CarouselMessage: &waE2E.InteractiveMessage_CarouselMessage{
+					Cards: cards, MessageVersion: proto.Int32(1),
+				},
+			},
+		},
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: newMessageSecret()},
+	}
+	s.sendNativeFlow(sess, w, r, jid, msg)
+}
+
+// ownNumber devolve o número (PN, sem sufixo de device) da conta conectada.
+func (s *Session) ownNumber() string {
+	if id := s.client.Store.ID; id != nil {
+		return id.ToNonAD().User
+	}
+	return ""
+}
+
+// groupSafeButton monta o botão convertendo quick_reply -> cta_url wa.me QUANDO o
+// destino é um GRUPO. Motivo: em grupo, tocar num quick_reply POSTA a escolha pro
+// grupo inteiro (todo mundo é notificado = "marca geral"). Convertido pra wa.me, o
+// toque abre o PV com a gente (texto pronto) e NÃO posta nada no grupo. Fora de
+// grupo (1:1), mantém o comportamento normal.
+func (s *Session) groupSafeButton(isGroup bool, typ, display, url2, id, copyCode, phone string, idx int) (string, string) {
+	if isGroup && typ == "quick_reply" {
+		if num := s.ownNumber(); num != "" {
+			text := display
+			if text == "" {
+				text = id
+			}
+			waURL := "https://wa.me/" + num + "?text=" + url.QueryEscape(text)
+			return "cta_url", jsonStr(map[string]string{"display_text": display, "url": waURL, "merchant_url": waURL})
+		}
+	}
+	return nativeFlowButton(typ, display, url2, id, copyCode, phone, idx)
+}
+
+// nativeFlowButton monta (name, buttonParamsJSON) de um botão nativeFlow.
+func nativeFlowButton(typ, display, url, id, copyCode, phone string, idx int) (string, string) {
+	switch typ {
+	case "quick_reply":
+		if id == "" {
+			id = "qr_" + itoa(idx+1)
+		}
+		return "quick_reply", jsonStr(map[string]string{"display_text": display, "id": id})
+	case "cta_url":
+		return "cta_url", jsonStr(map[string]string{"display_text": display, "url": url, "merchant_url": url})
+	case "cta_copy":
+		if copyCode == "" {
+			copyCode = id
+		}
+		return "cta_copy", jsonStr(map[string]string{"display_text": display, "copy_code": copyCode, "id": copyCode})
+	case "cta_call":
+		return "cta_call", jsonStr(map[string]string{"display_text": display, "phone_number": phone})
+	case "webview", "form":
+		// Abre a URL numa WEBVIEW dentro do WhatsApp (tela cheia) — form-like sem WABA.
+		wb, _ := json.Marshal(map[string]any{
+			"display_text":         display,
+			"url":                  url,
+			"merchant_url":         url,
+			"webview_presentation": "full",
+			"webview_interaction":  true,
+		})
+		return "cta_url", string(wb)
+	default:
+		return "", ""
+	}
+}
+
+func jsonStr(m map[string]string) string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}

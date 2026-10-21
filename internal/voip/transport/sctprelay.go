@@ -1,0 +1,586 @@
+package transport
+
+import (
+	"fmt"
+	"log/slog"
+	"math/rand"
+	"regexp"
+	"sync"
+	"time"
+	"growupcalls/internal/voip/core"
+
+	"github.com/pion/ice/v4"
+	"github.com/pion/webrtc/v4"
+)
+
+const (
+	relayConnectionTimeout = 20 * time.Second
+	relayKeepaliveInterval = 1100 * time.Millisecond
+	// relayConsentBasePeriod é o período base para renovar o consent freshness
+	// (RFC 7675) no par ativo. O WhatsApp derruba a mídia por volta dos ~20s se não
+	// receber Binding requests periódicos; o WhatsAppPing sozinho (keepalive) não
+	// renova esse consent. A RFC manda: default 5s, cada intervalo randomizado em
+	// 0.8–1.2x (4–6s, nunca < 4s) para evitar sincronização, e expiry de 30s.
+	relayConsentBasePeriod = 5 * time.Second
+
+	// maxDialRelays limita quantos relays são discados por chamada (corta
+	// goroutines/conexões desnecessárias quando o WhatsApp anuncia muitos relays).
+	maxDialRelays = 3
+	// maxOpenRelays limita quantos relays ficam abertos ao mesmo tempo por chamada.
+	maxOpenRelays = 2
+)
+
+// relayAPI compartilha uma API do pion com mDNS desligado: evita o custo/latência
+// da coleta de candidatos MulticastDNS, que não serve pra nada nesse caso (os
+// candidatos do relay são injetados manualmente no SDP).
+var relayAPI = func() *webrtc.API {
+	s := webrtc.SettingEngine{}
+	s.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	return webrtc.NewAPI(webrtc.WithSettingEngine(s))
+}()
+
+type relayConnState int
+
+const (
+	relayStateConnecting relayConnState = iota
+	relayStateOpen
+	relayStateClosed
+	relayStateFailed
+)
+
+type RelayConfig struct {
+	IP           string
+	Port         int
+	Token        string
+	AuthToken    string
+	RawAuthToken []byte
+	RawToken     []byte
+	Key          string
+	RelayID      int
+	Name         string
+	AuthTokenID  string
+}
+
+type relayConnection struct {
+	state      relayConnState
+	pc         *webrtc.PeerConnection
+	channel    *webrtc.DataChannel
+	id         string
+	info       RelayConfig
+	localUfrag string
+	keepalive  *time.Ticker
+	stopCh     chan struct{}
+}
+
+type SctpRelayManager struct {
+	mu          sync.Mutex
+	connections map[string]*relayConnection
+	log         *slog.Logger
+
+	audioSsrc        uint32
+	subscriptionSsrc uint32
+	streamSelfSsrcs  []uint32
+	streamPeerSsrcs  []uint32
+
+	onConnected func(ip string, port int)
+
+	onReceive func(data []byte)
+
+	// groupAllocate, quando setado, substitui o Allocate 1:1 pelo Allocate de GRUPO
+	// (assinaturas de grupo + HBH-FEC). Recebe o endpoint/token/chave do relay e
+	// devolve o pacote STUN pronto. Chamado a cada (re)envio de registro/keepalive.
+	groupAllocate func(ip string, port int, rawToken, key []byte) []byte
+}
+
+// SetGroupAllocate liga o modo de chamada em GRUPO no relay: o Allocate passa a ser
+// montado pela função fornecida (BuildGroupAllocate) em vez do Allocate 1:1.
+func (m *SctpRelayManager) SetGroupAllocate(fn func(ip string, port int, rawToken, key []byte) []byte) {
+	m.mu.Lock()
+	m.groupAllocate = fn
+	m.mu.Unlock()
+}
+
+func NewSctpRelayManager(log *slog.Logger) *SctpRelayManager {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &SctpRelayManager{
+		connections: map[string]*relayConnection{},
+		log:         log,
+	}
+}
+
+func (m *SctpRelayManager) SetSsrc(ssrc uint32) { m.audioSsrc = ssrc }
+
+func (m *SctpRelayManager) SetSubscriptionSsrc(ssrc uint32) { m.subscriptionSsrc = ssrc }
+
+func (m *SctpRelayManager) SetStreamSsrcs(selfSsrcs, peerSsrcs []uint32) {
+	m.streamSelfSsrcs = append(m.streamSelfSsrcs[:0], selfSsrcs...)
+	m.streamPeerSsrcs = append(m.streamPeerSsrcs[:0], peerSsrcs...)
+}
+
+func (m *SctpRelayManager) SetOnConnected(fn func(ip string, port int)) { m.onConnected = fn }
+
+func (m *SctpRelayManager) SetOnReceive(fn func(data []byte)) { m.onReceive = fn }
+
+func (m *SctpRelayManager) ResendSubscriptions() {
+	m.mu.Lock()
+	conns := make([]*relayConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+	for _, c := range conns {
+		if c.state == relayStateOpen && c.channel != nil {
+			m.sendStunRegistration(c)
+		}
+	}
+}
+
+func connID(ip string, port int, authTokenID string) string {
+	base := fmt.Sprintf("%s:%d", ip, port)
+	if authTokenID != "" {
+		return base + "#" + authTokenID
+	}
+	return base
+}
+
+func (m *SctpRelayManager) ConfigureRelays(relays []RelayConfig) {
+	var wg sync.WaitGroup
+	m.mu.Lock()
+	dialed := len(m.connections)
+	m.mu.Unlock()
+	for _, r := range relays {
+		if dialed >= maxDialRelays {
+			break
+		}
+		port := r.Port
+		if port == 0 {
+			port = core.WARelayPort
+		}
+		r.Port = port
+		id := connID(r.IP, port, r.AuthTokenID)
+		m.mu.Lock()
+		_, exists := m.connections[id]
+		m.mu.Unlock()
+		if exists {
+			continue
+		}
+		dialed++
+		wg.Add(1)
+		go func(rc RelayConfig) {
+			defer wg.Done()
+			m.connectToRelay(rc)
+		}(r)
+	}
+	wg.Wait()
+}
+
+func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
+	id := connID(info.IP, info.Port, info.AuthTokenID)
+	m.log.Info("relay connecting", "id", id, "name", info.Name)
+
+	conn := &relayConnection{
+		state:  relayStateConnecting,
+		id:     id,
+		info:   info,
+		stopCh: make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.connections[id] = conn
+	m.mu.Unlock()
+
+	pc, err := relayAPI.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		m.log.Error("relay peerconnection failed", "id", id, "err", err)
+		m.failConnection(conn)
+		return
+	}
+	conn.pc = pc
+
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		m.log.Info("relay ice state", "id", id, "state", s.String())
+		if s == webrtc.ICEConnectionStateFailed || s == webrtc.ICEConnectionStateDisconnected {
+			m.failConnection(conn)
+		}
+	})
+
+	ordered := false
+	channel, err := pc.CreateDataChannel("wa-web-call", &webrtc.DataChannelInit{Ordered: &ordered})
+	if err != nil {
+		m.log.Error("relay datachannel failed", "id", id, "err", err)
+		m.failConnection(conn)
+		return
+	}
+	conn.channel = channel
+
+	channel.OnOpen(func() {
+		m.mu.Lock()
+		if m.countOpenLocked() >= maxOpenRelays {
+			m.mu.Unlock()
+			m.log.Info("relay acima do cap; fechando excedente", "id", id, "cap", maxOpenRelays)
+			go m.closeConnection(id)
+			return
+		}
+		conn.state = relayStateOpen
+		m.mu.Unlock()
+		m.log.Info("relay datachannel open", "id", id)
+		m.sendStunRegistration(conn)
+		m.startKeepalive(conn)
+		if m.onConnected != nil {
+			m.onConnected(info.IP, info.Port)
+		}
+	})
+	channel.OnClose(func() { m.closeConnection(id) })
+	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if m.onReceive != nil {
+			m.onReceive(msg.Data)
+		}
+	})
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		m.failConnection(conn)
+		return
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		m.failConnection(conn)
+		return
+	}
+
+	conn.localUfrag = extractFirst(reUfrag, offer.SDP)
+	munged := m.modifySdpForRelay(offer.SDP, info)
+
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: munged}); err != nil {
+		m.log.Error("relay set remote description failed", "id", id, "err", err)
+		m.failConnection(conn)
+		return
+	}
+
+	go func() {
+		select {
+		case <-time.After(relayConnectionTimeout):
+			if conn.state == relayStateConnecting {
+				m.log.Debug("relay connection timeout", "id", id)
+				m.failConnection(conn)
+			}
+		case <-conn.stopCh:
+		}
+	}()
+}
+
+var (
+	reSetup       = regexp.MustCompile(`a=setup:actpass`)
+	reUfragLine   = regexp.MustCompile(`a=ice-ufrag:[^\r\n]+`)
+	rePwdLine     = regexp.MustCompile(`a=ice-pwd:[^\r\n]+`)
+	reFingerprint = regexp.MustCompile(`a=fingerprint:[^\r\n]+`)
+	reMaxMsg      = regexp.MustCompile(`a=max-message-size:[^\r\n]+`)
+	reIceOptions  = regexp.MustCompile(`a=ice-options:[^\r\n]+\r?\n`)
+	reCandidate   = regexp.MustCompile(`a=candidate:[^\r\n]+\r?\n`)
+	reEndCand     = regexp.MustCompile(`a=end-of-candidates\r?\n?`)
+	reUfrag       = regexp.MustCompile(`a=ice-ufrag:([^\r\n]+)`)
+)
+
+func (m *SctpRelayManager) modifySdpForRelay(sdp string, info RelayConfig) string {
+	out := reSetup.ReplaceAllString(sdp, "a=setup:passive")
+
+	iceUfrag := info.AuthToken
+	if iceUfrag == "" {
+		iceUfrag = info.Token
+	}
+	out = reUfragLine.ReplaceAllString(out, "a=ice-ufrag:"+iceUfrag)
+	out = rePwdLine.ReplaceAllString(out, "a=ice-pwd:"+info.Key)
+	out = reFingerprint.ReplaceAllString(out, "a=fingerprint:"+core.WADTLSFingerprint)
+	out = reMaxMsg.ReplaceAllString(out, "a=max-message-size:1500")
+	out = reIceOptions.ReplaceAllString(out, "")
+
+	out = reCandidate.ReplaceAllString(out, "")
+	out = reEndCand.ReplaceAllString(out, "")
+	candidate := fmt.Sprintf("a=candidate:2 1 udp 2122262783 %s %d typ host generation 0 network-cost 5", info.IP, info.Port)
+	out += candidate + "\r\n" + "a=end-of-candidates" + "\r\n"
+	return out
+}
+
+func extractFirst(re *regexp.Regexp, s string) string {
+	if mm := re.FindStringSubmatch(s); len(mm) > 1 {
+		return mm[1]
+	}
+	return ""
+}
+
+func (m *SctpRelayManager) sendStunRegistration(conn *relayConnection) {
+	info := conn.info
+	remoteUfrag := info.AuthToken
+	if remoteUfrag == "" {
+		remoteUfrag = info.Token
+	}
+	if remoteUfrag == "" && m.groupAllocate == nil {
+		return
+	}
+	localUfrag := conn.localUfrag
+	hmacKey := []byte(info.Key)
+
+	send := func() {
+		if conn.state != relayStateOpen || conn.channel == nil {
+			return
+		}
+		ssrc := m.subscriptionSsrc
+		if ssrc == 0 {
+			ssrc = m.audioSsrc
+		}
+		if ssrc == 0 {
+			return
+		}
+		subs := BuildSenderSubscriptions(ssrc)
+
+		if localUfrag != "" {
+			username := []byte(remoteUfrag + ":" + localUfrag)
+			m.sendRaw(conn, BuildBindingRequestWithSubs(username, hmacKey, subs, true, true))
+		}
+		if info.Token != "" && info.Token != remoteUfrag && localUfrag != "" {
+			username := []byte(info.Token + ":" + localUfrag)
+			m.sendRaw(conn, BuildBindingRequestWithSubs(username, hmacKey, subs, true, true))
+		}
+		m.sendRaw(conn, BuildBindingRequestWithSubs(nil, nil, subs, false, false))
+
+		if len(info.RawToken) > 0 {
+			if m.groupAllocate != nil {
+				// Chamada em GRUPO: Allocate com assinaturas de grupo + HBH-FEC.
+				if pkt := m.groupAllocate(info.IP, info.Port, info.RawToken, hmacKey); len(pkt) > 0 {
+					m.sendRaw(conn, pkt)
+				}
+			} else {
+				var selfSsrcs, peerSsrcs []uint32
+				if len(m.streamSelfSsrcs) > 0 {
+					selfSsrcs = m.streamSelfSsrcs
+					peerSsrcs = m.streamPeerSsrcs
+				} else {
+					selfSsrcs = []uint32{m.audioSsrc}
+					if m.subscriptionSsrc != 0 {
+						peerSsrcs = []uint32{m.subscriptionSsrc}
+					}
+				}
+				ssrcList := BuildSSRCSubscriptionList(selfSsrcs, peerSsrcs, 0, 0)
+				m.sendRaw(conn, BuildAllocateForRelay(info.RawToken, ssrcList, hmacKey, info.IP, info.Port))
+			}
+		}
+	}
+
+	send()
+	for _, d := range []time.Duration{50, 150, 500, 3000} {
+		delay := d * time.Millisecond
+		go func() {
+			select {
+			case <-time.After(delay):
+				m.mu.Lock()
+				open := conn.state == relayStateOpen
+				m.mu.Unlock()
+				if open {
+					send()
+				}
+			case <-conn.stopCh:
+			}
+		}()
+	}
+}
+
+func (m *SctpRelayManager) startKeepalive(conn *relayConnection) {
+	m.sendRaw(conn, BuildWhatsAppPing())
+	ticker := time.NewTicker(relayKeepaliveInterval)
+	conn.keepalive = ticker
+	consent := time.NewTimer(consentInterval())
+	go func() {
+		defer consent.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if conn.state != relayStateOpen || conn.channel == nil {
+					return
+				}
+				m.sendRaw(conn, BuildWhatsAppPing())
+			case <-consent.C:
+				if conn.state != relayStateOpen || conn.channel == nil {
+					return
+				}
+				m.sendConsentBinding(conn)
+				consent.Reset(consentInterval())
+			case <-conn.stopCh:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+// consentInterval devolve o próximo intervalo entre checks de consent, randomizado
+// em 0.8–1.2x o período base (RFC 7675, seção 5.1). A randomização evita que
+// múltiplas conexões sincronizem os checks; o piso de 4s (0.8*5s) respeita o
+// "MUST NOT set the period between checks to less than 4 seconds".
+func consentInterval() time.Duration {
+	factor := 0.8 + rand.Float64()*0.4 // [0.8, 1.2)
+	return time.Duration(float64(relayConsentBasePeriod) * factor)
+}
+
+// sendConsentBinding reenvia o STUN Binding request autenticado (com as
+// subscriptions) no par ativo, renovando o consent freshness (RFC 7675). Sem
+// esse Binding periódico o WhatsApp expira o consent e encerra a mídia por volta
+// dos ~20s, mesmo com áudio fluindo nos dois sentidos. Reaproveita exatamente os
+// mesmos pacotes que sendStunRegistration já manda no setup.
+func (m *SctpRelayManager) sendConsentBinding(conn *relayConnection) {
+	info := conn.info
+	remoteUfrag := info.AuthToken
+	if remoteUfrag == "" {
+		remoteUfrag = info.Token
+	}
+	localUfrag := conn.localUfrag
+	if remoteUfrag == "" || localUfrag == "" {
+		return
+	}
+	ssrc := m.subscriptionSsrc
+	if ssrc == 0 {
+		ssrc = m.audioSsrc
+	}
+	if ssrc == 0 {
+		return
+	}
+	hmacKey := []byte(info.Key)
+	subs := BuildSenderSubscriptions(ssrc)
+
+	username := []byte(remoteUfrag + ":" + localUfrag)
+	m.sendRaw(conn, BuildBindingRequestWithSubs(username, hmacKey, subs, true, true))
+	if info.Token != "" && info.Token != remoteUfrag {
+		username2 := []byte(info.Token + ":" + localUfrag)
+		m.sendRaw(conn, BuildBindingRequestWithSubs(username2, hmacKey, subs, true, true))
+	}
+}
+
+func (m *SctpRelayManager) sendRaw(conn *relayConnection, data []byte) {
+	if conn.channel == nil || conn.state != relayStateOpen {
+		return
+	}
+	if err := conn.channel.Send(data); err != nil {
+		m.log.Debug("relay send error", "id", conn.id, "err", err)
+	}
+}
+
+func (m *SctpRelayManager) Broadcast(data []byte) {
+	m.mu.Lock()
+	conns := make([]*relayConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+	for _, c := range conns {
+		m.sendRaw(c, data)
+	}
+}
+
+func (m *SctpRelayManager) countOpenLocked() int {
+	n := 0
+	for _, c := range m.connections {
+		if c.state == relayStateOpen {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *SctpRelayManager) BufferedAmount() uint64 {
+	m.mu.Lock()
+	conns := make([]*relayConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+	var maxBuf uint64
+	for _, c := range conns {
+		if c.state == relayStateOpen && c.channel != nil {
+			if b := c.channel.BufferedAmount(); b > maxBuf {
+				maxBuf = b
+			}
+		}
+	}
+	return maxBuf
+}
+
+func (m *SctpRelayManager) HasConnection() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.connections {
+		if c.state == relayStateOpen {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *SctpRelayManager) ConnectedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, c := range m.connections {
+		if c.state == relayStateOpen {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *SctpRelayManager) failConnection(conn *relayConnection) {
+	m.mu.Lock()
+	if conn.state == relayStateFailed {
+		m.mu.Unlock()
+		return
+	}
+	conn.state = relayStateFailed
+	delete(m.connections, conn.id)
+	m.mu.Unlock()
+	m.teardown(conn)
+}
+
+func (m *SctpRelayManager) closeConnection(id string) {
+	m.mu.Lock()
+	conn := m.connections[id]
+	if conn == nil {
+		m.mu.Unlock()
+		return
+	}
+	conn.state = relayStateClosed
+	delete(m.connections, id)
+	m.mu.Unlock()
+	m.teardown(conn)
+}
+
+func (m *SctpRelayManager) teardown(conn *relayConnection) {
+	select {
+	case <-conn.stopCh:
+	default:
+		close(conn.stopCh)
+	}
+	if conn.keepalive != nil {
+		conn.keepalive.Stop()
+	}
+	if conn.channel != nil {
+		_ = conn.channel.Close()
+	}
+	if conn.pc != nil {
+		_ = conn.pc.Close()
+	}
+}
+
+func (m *SctpRelayManager) Cleanup() {
+	m.mu.Lock()
+	conns := make([]*relayConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.connections = map[string]*relayConnection{}
+	m.audioSsrc = 0
+	m.subscriptionSsrc = 0
+	m.streamSelfSsrcs = nil
+	m.streamPeerSsrcs = nil
+	m.mu.Unlock()
+	for _, c := range conns {
+		m.teardown(c)
+	}
+}
