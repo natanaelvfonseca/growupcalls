@@ -40,13 +40,18 @@ const rowsToRecipients = (rows: string[][]) => {
   const headers = rows[0].map((h, i) => normalize(h).replace(/\s+/g, "_") || `campo_${i + 1}`);
   const phoneIndex = headers.findIndex((h) => ["telefone", "phone", "celular", "whatsapp", "numero"].includes(h));
   if (phoneIndex < 0) throw new Error("Crie uma coluna chamada telefone, celular, WhatsApp ou phone.");
+  const seen = new Set<string>();
   const recipients = rows.slice(1).map((values) => {
     const variables: Record<string, string> = {};
     headers.forEach((header, i) => { variables[header] = values[i]?.trim() ?? ""; });
     const phone = cleanPhone(values[phoneIndex] ?? "");
     variables.telefone = phone;
     return { phone, variables };
-  }).filter((r) => r.phone.length >= 10);
+  }).filter((r) => {
+    if (r.phone.length < 10 || seen.has(r.phone)) return false;
+    seen.add(r.phone);
+    return true;
+  });
   return { recipients, headers };
 };
 
