@@ -19,6 +19,7 @@ export interface CampaignButton {
 export interface CampaignContent {
   kind: MessageKind;
   body: string;
+  variants?: string[];
   footer?: string;
   buttonText?: string;
   buttons?: CampaignButton[];

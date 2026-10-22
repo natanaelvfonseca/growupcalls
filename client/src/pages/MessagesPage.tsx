@@ -72,6 +72,8 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
   const [campaignName, setCampaignName] = useState("");
   const [kind, setKind] = useState<MessageKind>("text");
   const [body, setBody] = useState("Olá, {{nome}}! ");
+  const [variations, setVariations] = useState<string[]>([]);
+  const [previewIndex, setPreviewIndex] = useState(0);
   const [footer, setFooter] = useState("Enviado pela Growup");
   const [buttons, setButtons] = useState<CampaignButton[]>([
     { type: "quick_reply", displayText: "Tenho interesse", id: "interesse" },
@@ -89,10 +91,11 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
 
   const preview = useMemo(() => {
     const vars = recipients[0]?.variables ?? { nome: "Maria", telefone: "5511999999999" };
-    let value = body;
+    const templates = [body, ...variations];
+    let value = templates[Math.min(previewIndex, templates.length - 1)] ?? body;
     Object.entries(vars).forEach(([key, replacement]) => { value = value.replaceAll(`{{${key}}}`, replacement); });
     return value;
-  }, [body, recipients]);
+  }, [body, previewIndex, recipients, variations]);
 
   const loadJobs = async () => {
     try {
@@ -132,7 +135,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
       const job = await createCampaign(sid, {
         name: campaignName.trim() || `Campanha ${new Date().toLocaleString("pt-BR")}`,
         recipients,
-        content: { kind, body, footer, buttonText, buttons, sections: kind === "list" ? [{ title: "Opções", rows }] : undefined },
+        content: { kind, body, variants: [body, ...variations], footer, buttonText, buttons, sections: kind === "list" ? [{ title: "Opções", rows }] : undefined },
         delayMs: Math.max(1, delaySeconds) * 1000,
         jitterMs: Math.max(0, jitterSeconds) * 1000,
       });
@@ -157,6 +160,10 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{kindOptions.map((option) => <button type="button" key={option.value} onClick={() => setKind(option.value)} className={cn("flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm transition-colors", kind === option.value ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-accent")}><option.icon className="h-4 w-4" />{option.label}</button>)}</div>
           <div className="space-y-2"><Label>Nome da campanha</Label><Input value={campaignName} onChange={(e) => setCampaignName(e.target.value)} placeholder="Ex.: Leads outubro" /></div>
           <div className="space-y-2"><Label>Mensagem</Label><textarea className={textareaClass} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Olá, {{nome}}! Temos uma informação para você." /><p className="flex items-center gap-1 text-xs text-muted-foreground"><Braces className="h-3.5 w-3.5" /> Use qualquer coluna como variável: {`{{nome}}`}, {`{{curso}}`}, {`{{vencimento}}`}.</p></div>
+          <div className="space-y-3 rounded-2xl border bg-muted/20 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><Label>Variações da mensagem</Label><p className="mt-1 text-xs text-muted-foreground">O servidor alterna as versões em rodízio entre os contatos.</p></div><Button type="button" variant="outline" size="sm" onClick={() => { setVariations((current) => [...current, ""]); setPreviewIndex(variations.length + 1); }}>Adicionar variação</Button></div>
+            {variations.length === 0 ? <p className="text-sm text-muted-foreground">Somente a mensagem principal será usada.</p> : variations.map((variation, index) => <div key={index} className="space-y-2 rounded-xl border bg-card p-3"><div className="flex items-center justify-between"><button type="button" className={cn("text-sm font-medium", previewIndex === index + 1 && "text-primary")} onClick={() => setPreviewIndex(index + 1)}>Variação {index + 2}</button><Button type="button" variant="ghost" size="icon" onClick={() => { setVariations((all) => all.filter((_, i) => i !== index)); setPreviewIndex(0); }}><Trash2 className="h-4 w-4" /></Button></div><textarea className={textareaClass} value={variation} onFocus={() => setPreviewIndex(index + 1)} onChange={(e) => setVariations((all) => all.map((value, i) => i === index ? e.target.value : value))} placeholder={`Outra forma de escrever a mensagem usando {{nome}}...`} /></div>)}
+          </div>
           {kind !== "text" && <div className="space-y-2"><Label>Rodapé</Label><Input value={footer} onChange={(e) => setFooter(e.target.value)} /></div>}
 
           {(kind === "buttons" || kind === "interactive") && <div className="space-y-3"><div className="flex items-center justify-between"><Label>Botões {kind === "buttons" && "(máximo 3)"}</Label><Button type="button" variant="outline" size="sm" disabled={kind === "buttons" && buttons.length >= 3} onClick={() => setButtons((current) => [...current, { type: kind === "buttons" ? "quick_reply" : "cta_url", displayText: "Novo botão", id: `acao_${current.length + 1}` }])}>Adicionar</Button></div>
@@ -175,7 +182,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
         </CardContent></Card>
       </div>
 
-      <Card className="h-fit xl:sticky xl:top-0"><CardHeader><CardTitle>Prévia</CardTitle><CardDescription>Exemplo usando o primeiro lead da lista.</CardDescription></CardHeader><CardContent><div className="mx-auto max-w-sm rounded-2xl bg-[#e7ffdb] p-4 text-[15px] text-[#17221a] shadow-sm dark:bg-emerald-950 dark:text-emerald-50"><p className="whitespace-pre-wrap">{preview || "Sua mensagem aparecerá aqui."}</p>{kind === "list" && <button className="mt-3 w-full border-t border-emerald-900/10 pt-3 font-medium text-sky-700">{buttonText}</button>}{(kind === "buttons" || kind === "interactive") && <div className="mt-3 space-y-1 border-t border-emerald-900/10 pt-2">{buttons.map((b, i) => <div key={i} className="py-1.5 text-center font-medium text-sky-700">{b.displayText}</div>)}</div>}{kind !== "text" && footer && <p className="mt-2 text-xs opacity-60">{footer}</p>}</div></CardContent></Card>
+      <Card className="h-fit xl:sticky xl:top-0"><CardHeader><CardTitle>Prévia</CardTitle><CardDescription>Exemplo usando o primeiro lead da lista.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex flex-wrap gap-2">{[body, ...variations].map((_, index) => <button type="button" key={index} onClick={() => setPreviewIndex(index)} className={cn("rounded-full border px-2.5 py-1 text-xs", previewIndex === index ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>Versão {index + 1}</button>)}</div><div className="mx-auto max-w-sm rounded-2xl bg-[#e7ffdb] p-4 text-[15px] text-[#17221a] shadow-sm dark:bg-emerald-950 dark:text-emerald-50"><p className="whitespace-pre-wrap">{preview || "Sua mensagem aparecerá aqui."}</p>{kind === "list" && <button className="mt-3 w-full border-t border-emerald-900/10 pt-3 font-medium text-sky-700">{buttonText}</button>}{(kind === "buttons" || kind === "interactive") && <div className="mt-3 space-y-1 border-t border-emerald-900/10 pt-2">{buttons.map((b, i) => <div key={i} className="py-1.5 text-center font-medium text-sky-700">{b.displayText}</div>)}</div>}{kind !== "text" && footer && <p className="mt-2 text-xs opacity-60">{footer}</p>}</div></CardContent></Card>
     </div>
 
     <Card><CardHeader><CardTitle>Campanhas recentes</CardTitle><CardDescription>O processamento continua no servidor mesmo com a aba fechada.</CardDescription></CardHeader><CardContent className="space-y-3">{jobs.length === 0 ? <p className="text-sm text-muted-foreground">Nenhuma campanha nesta execução do servidor.</p> : jobs.map((job) => { const progress = job.total ? Math.round(((job.sent + job.failed) / job.total) * 100) : 0; return <div key={job.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium">{job.name}</p><p className="text-xs text-muted-foreground">{statusLabel[job.status]} · {job.sent} enviados · {job.failed} falhas · {job.total} total</p></div><div className="flex items-center gap-2">{job.status === "running" ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : job.status === "completed" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : job.failed ? <XCircle className="h-4 w-4 text-destructive" /> : null}{(job.status === "running" || job.status === "pending") && <Button variant="outline" size="sm" onClick={async () => { await cancelCampaign(sid, job.id); void loadJobs(); }}>Cancelar</Button>}</div></div><div className="mt-3 h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>{job.results?.some((r) => !r.ok) && <details className="mt-3 text-xs text-destructive"><summary className="cursor-pointer">Ver falhas</summary><div className="mt-2 space-y-1">{job.results.filter((r) => !r.ok).map((r, i) => <p key={i}>{r.to}: {r.error}</p>)}</div></details>}</div>; })}</CardContent></Card>

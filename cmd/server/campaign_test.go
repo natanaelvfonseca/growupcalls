@@ -10,6 +10,7 @@ func TestRenderCampaignContent(t *testing.T) {
 	src := CampaignContent{
 		Kind:       "list",
 		Body:       "Olá, {{nome}}. Parcela: {{valor}}",
+		Variants:   []string{"Oi, {{nome}}", "Olá, {{nome}} — {{valor}}"},
 		ButtonText: "Opções de {{nome}}",
 		Sections: []CampaignSection{{
 			Title: "Contrato {{contrato}}",
@@ -23,6 +24,9 @@ func TestRenderCampaignContent(t *testing.T) {
 
 	if got.Body != "Olá, Ana. Parcela: R$ 100" {
 		t.Fatalf("body não personalizado: %q", got.Body)
+	}
+	if len(got.Variants) != 2 || got.Variants[0] != "Oi, Ana" || got.Variants[1] != "Olá, Ana — R$ 100" {
+		t.Fatalf("variações não personalizadas: %#v", got.Variants)
 	}
 	if got.ButtonText != "Opções de Ana" || got.Sections[0].Title != "Contrato 42" {
 		t.Fatalf("campos da lista não personalizados: %#v", got)

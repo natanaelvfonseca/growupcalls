@@ -47,6 +47,7 @@ type CampaignSection struct {
 type CampaignContent struct {
 	Kind       string            `json:"kind"` // text|buttons|interactive|list
 	Body       string            `json:"body"`
+	Variants   []string          `json:"variants,omitempty"`
 	Footer     string            `json:"footer"`
 	ButtonText string            `json:"buttonText"`
 	Buttons    []CampaignButton  `json:"buttons"`
@@ -92,6 +93,12 @@ func renderCampaignTemplate(v string, vars map[string]string) string {
 func renderCampaignContent(src CampaignContent, vars map[string]string) CampaignContent {
 	dst := src
 	dst.Body = renderCampaignTemplate(src.Body, vars)
+	dst.Variants = make([]string, 0, len(src.Variants))
+	for _, variant := range src.Variants {
+		if rendered := strings.TrimSpace(renderCampaignTemplate(variant, vars)); rendered != "" {
+			dst.Variants = append(dst.Variants, rendered)
+		}
+	}
 	dst.Footer = renderCampaignTemplate(src.Footer, vars)
 	dst.ButtonText = renderCampaignTemplate(src.ButtonText, vars)
 	dst.Buttons = append([]CampaignButton(nil), src.Buttons...)
@@ -232,6 +239,11 @@ func (m *campaignManager) run(sess *Session, job *campaignJob, req campaignReque
 		jid, err := resolveRecipient(recipient.Phone)
 		if err == nil {
 			content := renderCampaignContent(req.Content, recipient.Variables)
+			// Distribuição previsível e equilibrada: cada variação é usada em rodízio.
+			// Isso facilita auditoria e garante que nenhuma opção fique sem uso.
+			if len(content.Variants) > 0 {
+				content.Body = content.Variants[i%len(content.Variants)]
+			}
 			var msg *waE2E.Message
 			var interactive bool
 			msg, interactive, err = buildCampaignMessage(sess, jid, content)
