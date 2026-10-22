@@ -20,6 +20,7 @@ export interface CampaignContent {
   kind: MessageKind;
   body: string;
   variants?: string[];
+  listMode?: "classic" | "native";
   footer?: string;
   buttonText?: string;
   buttons?: CampaignButton[];
@@ -60,3 +61,14 @@ export const getCampaign = (sid: string, id: string) =>
 
 export const cancelCampaign = (sid: string, id: string) =>
   apiPost<{ status: string }>(`/api/sessions/${sid}/campaigns/${id}/cancel`, {});
+
+export interface CampaignResponse {
+  chat: string;
+  sender: string;
+  id: string;
+  timestamp: number;
+  body: string;
+}
+
+export const listCampaignResponses = (sid: string) =>
+  apiGet<{ responses: CampaignResponse[] }>(`/api/sessions/${sid}/campaign-responses?limit=500`);

@@ -46,6 +46,19 @@ func TestBuildCampaignText(t *testing.T) {
 	}
 }
 
+func TestBuildCampaignClassicList(t *testing.T) {
+	msg, interactive, err := buildCampaignMessage(nil, typesJIDForTest(), CampaignContent{
+		Kind: "list", Body: "Escolha", ButtonText: "Abrir", ListMode: "classic",
+		Sections: []CampaignSection{{Title: "Opções", Rows: []CampaignRow{{ID: "sim", Title: "Sim"}}}},
+	})
+	if err != nil || interactive || msg.GetListMessage() == nil {
+		t.Fatalf("lista clássica inválida: interactive=%v err=%v msg=%v", interactive, err, msg)
+	}
+	if got := msg.GetListMessage().GetSections()[0].GetRows()[0].GetRowID(); got != "sim" {
+		t.Fatalf("row id = %q", got)
+	}
+}
+
 // O tipo é produzido pelo mesmo parser usado pelos endpoints, evitando fixtures
 // de JID divergentes da versão do whatsmeow pinada pelo projeto.
 func typesJIDForTest() types.JID {

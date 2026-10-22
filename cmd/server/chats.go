@@ -112,3 +112,19 @@ func (s *server) handleQueryMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, msgs)
 }
+
+// GET /api/sessions/{sid}/campaign-responses?limit=200
+// Respostas já recebidas de listas e botões, inclusive native flow.
+func (s *server) handleCampaignResponses(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	limit, _ := queryPage(r, 200)
+	responses, err := s.sessions.store.listInteractiveResponses(r.Context(), sess.id, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"responses": responses})
+}

@@ -92,6 +92,7 @@ func (s *server) routes() http.Handler {
 	// destinatário e mantém o envio mesmo se o navegador for fechado.
 	mux.HandleFunc("POST /api/sessions/{sid}/campaigns", s.handleCampaignCreate)
 	mux.HandleFunc("GET /api/sessions/{sid}/campaigns", s.handleCampaignList)
+	mux.HandleFunc("GET /api/sessions/{sid}/campaign-responses", s.handleCampaignResponses)
 	mux.HandleFunc("GET /api/sessions/{sid}/campaigns/{id}", s.handleCampaignGet)
 	mux.HandleFunc("POST /api/sessions/{sid}/campaigns/{id}/cancel", s.handleCampaignCancel)
 	mux.HandleFunc("GET /api/sessions/{sid}/native-forms", s.handleListNativeForms)

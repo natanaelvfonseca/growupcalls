@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Braces, CheckCircle2, FileSpreadsheet, ListChecks, Loader2, MessageSquareText, MousePointerClick, Play, Send, Trash2, Upload, Users, XCircle } from "lucide-react";
+import { Braces, CheckCircle2, FileSpreadsheet, ListChecks, Loader2, MessageSquareText, MousePointerClick, Play, RefreshCw, Send, Trash2, Upload, Users, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cancelCampaign, createCampaign, getCampaign, listCampaigns, type CampaignButton, type CampaignJob, type CampaignRecipient, type MessageKind } from "@/services/campaigns";
+import { cancelCampaign, createCampaign, getCampaign, listCampaignResponses, listCampaigns, type CampaignButton, type CampaignJob, type CampaignRecipient, type CampaignResponse, type MessageKind } from "@/services/campaigns";
 import { cn } from "@/lib/utils";
 
 const textareaClass = "min-h-28 w-full resize-y rounded-xl border border-input bg-transparent px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring";
@@ -80,6 +80,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
     { type: "quick_reply", displayText: "Falar depois", id: "depois" },
   ]);
   const [buttonText, setButtonText] = useState("Ver opções");
+  const [listMode, setListMode] = useState<"classic" | "native">("classic");
   const [rows, setRows] = useState([
     { id: "opcao_1", title: "Quero saber mais", description: "Receber mais informações" },
     { id: "opcao_2", title: "Falar com atendente", description: "Continuar com uma pessoa" },
@@ -88,6 +89,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
   const [jitterSeconds, setJitterSeconds] = useState(3);
   const [sending, setSending] = useState(false);
   const [jobs, setJobs] = useState<CampaignJob[]>([]);
+  const [responses, setResponses] = useState<CampaignResponse[]>([]);
 
   const preview = useMemo(() => {
     const vars = recipients[0]?.variables ?? { nome: "Maria", telefone: "5511999999999" };
@@ -105,9 +107,15 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
     } catch { /* sessão trocando ou backend anterior: não interrompe o editor */ }
   };
 
+  const loadResponses = async () => {
+    try { setResponses((await listCampaignResponses(sid)).responses); }
+    catch { /* versão anterior durante deploy ou sessão trocando */ }
+  };
+
   useEffect(() => {
     void loadJobs();
-    const timer = window.setInterval(() => void loadJobs(), 3000);
+    void loadResponses();
+    const timer = window.setInterval(() => { void loadJobs(); void loadResponses(); }, 3000);
     return () => window.clearInterval(timer);
   }, [sid]);
 
@@ -135,7 +143,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
       const job = await createCampaign(sid, {
         name: campaignName.trim() || `Campanha ${new Date().toLocaleString("pt-BR")}`,
         recipients,
-        content: { kind, body, variants: [body, ...variations], footer, buttonText, buttons, sections: kind === "list" ? [{ title: "Opções", rows }] : undefined },
+        content: { kind, body, variants: [body, ...variations], listMode, footer, buttonText, buttons, sections: kind === "list" ? [{ title: "Opções", rows }] : undefined },
         delayMs: Math.max(1, delaySeconds) * 1000,
         jitterMs: Math.max(0, jitterSeconds) * 1000,
       });
@@ -174,7 +182,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
               <Button type="button" variant="ghost" size="icon" onClick={() => setButtons((all) => all.filter((_, i) => i !== index))}><Trash2 className="h-4 w-4" /></Button>
             </div>)}</div>}
 
-          {kind === "list" && <div className="space-y-3"><div className="space-y-2"><Label>Texto do botão da lista</Label><Input value={buttonText} onChange={(e) => setButtonText(e.target.value)} /></div><div className="flex items-center justify-between"><Label>Opções</Label><Button type="button" variant="outline" size="sm" onClick={() => setRows((current) => [...current, { id: `opcao_${current.length + 1}`, title: "Nova opção", description: "" }])}>Adicionar</Button></div>
+          {kind === "list" && <div className="space-y-3"><div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label>Texto do botão da lista</Label><Input value={buttonText} onChange={(e) => setButtonText(e.target.value)} /></div><div className="space-y-2"><Label>Compatibilidade</Label><select className="h-9 w-full rounded-md border bg-card px-3 text-sm" value={listMode} onChange={(e) => setListMode(e.target.value as "classic" | "native")}><option value="classic">Lista clássica (recomendado)</option><option value="native">Lista moderna (native flow)</option></select></div></div><div className="flex items-center justify-between"><Label>Opções</Label><Button type="button" variant="outline" size="sm" onClick={() => setRows((current) => [...current, { id: `opcao_${current.length + 1}`, title: "Nova opção", description: "" }])}>Adicionar</Button></div>
             {rows.map((row, index) => <div key={index} className="grid gap-2 rounded-xl border bg-muted/30 p-3 sm:grid-cols-[1fr_1fr_1.4fr_auto]"><Input value={row.id} onChange={(e) => setRows((all) => all.map((r, i) => i === index ? { ...r, id: e.target.value } : r))} placeholder="ID" /><Input value={row.title} onChange={(e) => setRows((all) => all.map((r, i) => i === index ? { ...r, title: e.target.value } : r))} placeholder="Título" /><Input value={row.description} onChange={(e) => setRows((all) => all.map((r, i) => i === index ? { ...r, description: e.target.value } : r))} placeholder="Descrição" /><Button type="button" variant="ghost" size="icon" onClick={() => setRows((all) => all.filter((_, i) => i !== index))}><Trash2 className="h-4 w-4" /></Button></div>)}</div>}
 
           <div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label>Intervalo mínimo (segundos)</Label><Input type="number" min={1} value={delaySeconds} onChange={(e) => setDelaySeconds(Number(e.target.value))} /></div><div className="space-y-2"><Label>Variação aleatória (segundos)</Label><Input type="number" min={0} value={jitterSeconds} onChange={(e) => setJitterSeconds(Number(e.target.value))} /></div></div>
@@ -184,6 +192,8 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
 
       <Card className="h-fit xl:sticky xl:top-0"><CardHeader><CardTitle>Prévia</CardTitle><CardDescription>Exemplo usando o primeiro lead da lista.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex flex-wrap gap-2">{[body, ...variations].map((_, index) => <button type="button" key={index} onClick={() => setPreviewIndex(index)} className={cn("rounded-full border px-2.5 py-1 text-xs", previewIndex === index ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>Versão {index + 1}</button>)}</div><div className="mx-auto max-w-sm rounded-2xl bg-[#e7ffdb] p-4 text-[15px] text-[#17221a] shadow-sm dark:bg-emerald-950 dark:text-emerald-50"><p className="whitespace-pre-wrap">{preview || "Sua mensagem aparecerá aqui."}</p>{kind === "list" && <button className="mt-3 w-full border-t border-emerald-900/10 pt-3 font-medium text-sky-700">{buttonText}</button>}{(kind === "buttons" || kind === "interactive") && <div className="mt-3 space-y-1 border-t border-emerald-900/10 pt-2">{buttons.map((b, i) => <div key={i} className="py-1.5 text-center font-medium text-sky-700">{b.displayText}</div>)}</div>}{kind !== "text" && footer && <p className="mt-2 text-xs opacity-60">{footer}</p>}</div></CardContent></Card>
     </div>
+
+    <Card><CardHeader className="flex-row items-start justify-between"><div><CardTitle>Respostas recebidas</CardTitle><CardDescription>Cliques recuperados de listas e botões, inclusive das campanhas já enviadas.</CardDescription></div><Button type="button" variant="outline" size="sm" onClick={() => void loadResponses()}><RefreshCw className="h-4 w-4" /> Atualizar</Button></CardHeader><CardContent>{responses.length === 0 ? <p className="text-sm text-muted-foreground">Nenhum clique interativo foi encontrado no histórico desta conta.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead><tr className="border-b text-xs text-muted-foreground"><th className="px-3 py-2 font-medium">Contato</th><th className="px-3 py-2 font-medium">Resposta</th><th className="px-3 py-2 font-medium">Data</th></tr></thead><tbody>{responses.map((response) => <tr key={response.id} className="border-b last:border-0"><td className="px-3 py-3 font-mono text-xs">+{response.chat.split("@")[0]}</td><td className="px-3 py-3 font-medium">{response.body || "Resposta recebida"}</td><td className="px-3 py-3 text-muted-foreground">{new Date(response.timestamp).toLocaleString("pt-BR")}</td></tr>)}</tbody></table></div>}</CardContent></Card>
 
     <Card><CardHeader><CardTitle>Campanhas recentes</CardTitle><CardDescription>O processamento continua no servidor mesmo com a aba fechada.</CardDescription></CardHeader><CardContent className="space-y-3">{jobs.length === 0 ? <p className="text-sm text-muted-foreground">Nenhuma campanha nesta execução do servidor.</p> : jobs.map((job) => { const progress = job.total ? Math.round(((job.sent + job.failed) / job.total) * 100) : 0; return <div key={job.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium">{job.name}</p><p className="text-xs text-muted-foreground">{statusLabel[job.status]} · {job.sent} enviados · {job.failed} falhas · {job.total} total</p></div><div className="flex items-center gap-2">{job.status === "running" ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : job.status === "completed" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : job.failed ? <XCircle className="h-4 w-4 text-destructive" /> : null}{(job.status === "running" || job.status === "pending") && <Button variant="outline" size="sm" onClick={async () => { await cancelCampaign(sid, job.id); void loadJobs(); }}>Cancelar</Button>}</div></div><div className="mt-3 h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>{job.results?.some((r) => !r.ok) && <details className="mt-3 text-xs text-destructive"><summary className="cursor-pointer">Ver falhas</summary><div className="mt-2 space-y-1">{job.results.filter((r) => !r.ok).map((r, i) => <p key={i}>{r.to}: {r.error}</p>)}</div></details>}</div>; })}</CardContent></Card>
   </div>;

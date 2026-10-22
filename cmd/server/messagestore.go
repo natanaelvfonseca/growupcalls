@@ -152,6 +152,25 @@ func (s *sessionStore) listMessages(ctx context.Context, sessionID, chatJID stri
 	return scanMessages(rows)
 }
 
+// listInteractiveResponses recupera cliques em listas/botões já persistidos.
+// Filtramos pelo envelope protobuf no JSON, não pelo texto, para não misturar
+// respostas digitadas normalmente pelo contato.
+func (s *sessionStore) listInteractiveResponses(ctx context.Context, sessionID string, limit int) ([]storedMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chat_jid, sender_jid, msg_id, from_me, ts, type, COALESCE(body, ''), NULL
+		FROM messages
+		WHERE session_id = $1 AND from_me = false AND (
+			raw ? 'interactiveResponseMessage' OR raw ? 'listResponseMessage' OR
+			raw ? 'buttonsResponseMessage' OR raw ? 'templateButtonReplyMessage'
+		)
+		ORDER BY ts DESC LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
 // searchMessages busca por texto no corpo das mensagens (ILIKE, case-insensitive).
 // Se chatJID != "", limita ao chat. Mais recentes primeiro.
 func (s *sessionStore) searchMessages(ctx context.Context, sessionID, query, chatJID string, limit int) ([]storedMessage, error) {

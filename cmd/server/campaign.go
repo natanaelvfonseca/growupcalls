@@ -48,6 +48,7 @@ type CampaignContent struct {
 	Kind       string            `json:"kind"` // text|buttons|interactive|list
 	Body       string            `json:"body"`
 	Variants   []string          `json:"variants,omitempty"`
+	ListMode   string            `json:"listMode,omitempty"` // classic|native
 	Footer     string            `json:"footer"`
 	ButtonText string            `json:"buttonText"`
 	Buttons    []CampaignButton  `json:"buttons"`
@@ -163,6 +164,29 @@ func buildCampaignMessage(sess *Session, jid types.JID, c CampaignContent) (*waE
 	case "list":
 		if len(c.Sections) == 0 {
 			return nil, false, errors.New("adicione ao menos uma seção na lista")
+		}
+		if c.ListMode == "classic" {
+			listType := waE2E.ListMessage_SINGLE_SELECT
+			sections := make([]*waE2E.ListMessage_Section, 0, len(c.Sections))
+			for _, sec := range c.Sections {
+				rows := make([]*waE2E.ListMessage_Row, 0, len(sec.Rows))
+				for i, r := range sec.Rows {
+					id := r.ID
+					if id == "" {
+						id = "row_" + itoa(i+1)
+					}
+					rows = append(rows, &waE2E.ListMessage_Row{Title: proto.String(r.Title), Description: proto.String(r.Description), RowID: proto.String(id)})
+				}
+				sections = append(sections, &waE2E.ListMessage_Section{Title: proto.String(sec.Title), Rows: rows})
+			}
+			label := c.ButtonText
+			if label == "" {
+				label = "Ver opções"
+			}
+			return &waE2E.Message{ListMessage: &waE2E.ListMessage{
+				Description: proto.String(c.Body), ButtonText: proto.String(label), FooterText: proto.String(c.Footer),
+				ListType: &listType, Sections: sections,
+			}}, false, nil
 		}
 		type row struct {
 			Header      string `json:"header"`
