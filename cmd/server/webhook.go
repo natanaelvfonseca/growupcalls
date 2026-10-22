@@ -279,11 +279,11 @@ func interactiveResponseText(ir *waE2E.InteractiveResponseMessage) string {
 	if nf := ir.GetNativeFlowResponseMessage(); nf != nil {
 		var p map[string]any
 		if json.Unmarshal([]byte(nf.GetParamsJSON()), &p) == nil {
-			if id, ok := p["id"].(string); ok && id != "" {
-				return id
-			}
-			if dt, ok := p["display_text"].(string); ok && dt != "" {
-				return dt
+			// O nome do campo muda entre versões/clientes do WhatsApp.
+			for _, key := range []string{"title", "display_text", "selected_row_id", "selectedRowId", "id"} {
+				if value, ok := p[key].(string); ok && value != "" {
+					return value
+				}
 			}
 		}
 		return nf.GetParamsJSON()

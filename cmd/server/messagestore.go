@@ -152,16 +152,18 @@ func (s *sessionStore) listMessages(ctx context.Context, sessionID, chatJID stri
 	return scanMessages(rows)
 }
 
-// listInteractiveResponses recupera cliques em listas/botões já persistidos.
-// Filtramos pelo envelope protobuf no JSON, não pelo texto, para não misturar
-// respostas digitadas normalmente pelo contato.
+// listInteractiveResponses recupera respostas já persistidas. Inclui os cliques
+// reconhecidos e também texto digitado: algumas versões do WhatsApp convertem a
+// seleção da lista em texto simples, portanto filtrar só pelo envelope perderia
+// respostas reais de campanhas antigas.
 func (s *sessionStore) listInteractiveResponses(ctx context.Context, sessionID string, limit int) ([]storedMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT chat_jid, sender_jid, msg_id, from_me, ts, type, COALESCE(body, ''), NULL
 		FROM messages
-		WHERE session_id = $1 AND from_me = false AND (
+		WHERE session_id = $1 AND from_me = false AND COALESCE(body, '') <> '' AND (
 			raw ? 'interactiveResponseMessage' OR raw ? 'listResponseMessage' OR
-			raw ? 'buttonsResponseMessage' OR raw ? 'templateButtonReplyMessage'
+			raw ? 'buttonsResponseMessage' OR raw ? 'templateButtonReplyMessage' OR
+			type = 'text'
 		)
 		ORDER BY ts DESC LIMIT $2`, sessionID, limit)
 	if err != nil {

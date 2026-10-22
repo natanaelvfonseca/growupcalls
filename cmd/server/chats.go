@@ -126,5 +126,10 @@ func (s *server) handleCampaignResponses(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Converte @lid em telefone quando o device store conhece o pareamento.
+	for i := range responses {
+		responses[i].ChatJID = sess.callPeerOut(responses[i].ChatJID)
+		responses[i].SenderJID = sess.callPeerOut(responses[i].SenderJID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"responses": responses})
 }
