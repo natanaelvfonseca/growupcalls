@@ -88,4 +88,4 @@ ARG BUILD_REV=dev
 LABEL org.opencontainers.image.revision=$BUILD_REV
 EXPOSE 8080 50000
 ENTRYPOINT ["growupcalls"]
-CMD ["-addr", ":8080", "-static", "/app/client/dist", "-db", "/data/growupcalls.db"]
+CMD ["-addr", ":8080", "-static", "/app/client/dist"]
