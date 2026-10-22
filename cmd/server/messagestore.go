@@ -160,7 +160,8 @@ func (s *sessionStore) listInteractiveResponses(ctx context.Context, sessionID s
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT chat_jid, sender_jid, msg_id, from_me, ts, type, COALESCE(body, ''), NULL
 		FROM messages
-		WHERE session_id = $1 AND from_me = false AND COALESCE(body, '') <> '' AND (
+		WHERE session_id = $1 AND from_me = false AND COALESCE(body, '') <> ''
+		AND (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid') AND (
 			raw ? 'interactiveResponseMessage' OR raw ? 'listResponseMessage' OR
 			raw ? 'buttonsResponseMessage' OR raw ? 'templateButtonReplyMessage' OR
 			type = 'text'
