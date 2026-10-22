@@ -158,15 +158,21 @@ func (s *sessionStore) listMessages(ctx context.Context, sessionID, chatJID stri
 // respostas reais de campanhas antigas.
 func (s *sessionStore) listInteractiveResponses(ctx context.Context, sessionID string, limit int) ([]storedMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT chat_jid, sender_jid, msg_id, from_me, ts, type, COALESCE(body, ''), NULL
-		FROM messages
-		WHERE session_id = $1 AND from_me = false AND COALESCE(body, '') <> ''
-		AND (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid') AND (
-			raw ? 'interactiveResponseMessage' OR raw ? 'listResponseMessage' OR
-			raw ? 'buttonsResponseMessage' OR raw ? 'templateButtonReplyMessage' OR
-			type = 'text'
+		SELECT m.chat_jid, m.sender_jid, m.msg_id, m.from_me, m.ts, m.type, COALESCE(m.body, ''), NULL
+		FROM messages m
+		WHERE m.session_id = $1 AND m.from_me = false AND COALESCE(m.body, '') <> ''
+		AND (m.chat_jid LIKE '%@s.whatsapp.net' OR m.chat_jid LIKE '%@lid') AND (
+			m.raw ? 'interactiveResponseMessage' OR m.raw ? 'listResponseMessage' OR
+			m.raw ? 'buttonsResponseMessage' OR m.raw ? 'templateButtonReplyMessage' OR
+			EXISTS (
+				SELECT 1 FROM messages sent
+				WHERE sent.session_id = m.session_id AND sent.chat_jid = m.chat_jid
+				AND sent.from_me = true AND sent.ts <= m.ts AND m.ts - sent.ts <= 604800
+				AND (sent.raw ? 'listMessage' OR sent.raw ? 'interactiveMessage' OR
+					sent.raw ? 'buttonsMessage' OR sent.raw ? 'templateMessage')
+			)
 		)
-		ORDER BY ts DESC LIMIT $2`, sessionID, limit)
+		ORDER BY m.ts DESC LIMIT $2`, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
