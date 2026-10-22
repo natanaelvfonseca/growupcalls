@@ -7,7 +7,7 @@ import { Sidebar } from "./Sidebar";
 import { ThemeToggle } from "./ThemeToggle";
 import { useVersion } from "@/hooks/useVersion";
 
-export const AppShell = ({ children }: { children: ReactNode }) => {
+export const AppShell = ({ children, title = "Chamadas", navigation }: { children: ReactNode; title?: string; navigation?: ReactNode }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { label: version, commit } = useVersion();
 
@@ -40,7 +40,7 @@ export const AppShell = ({ children }: { children: ReactNode }) => {
                 <img src="/logoCalls.png" alt="GrowupCalls" className="h-6 w-auto select-none" draggable={false} />
               </span>
               <h1 className="hidden truncate text-2xl font-bold tracking-tight text-foreground md:block">
-                Chamadas
+                {title}
               </h1>
               {version && (
                 <span className="font-mono text-[0.6rem] leading-none text-muted-foreground md:hidden" title={commit ? `commit ${commit}` : "Versão rodando"}>
@@ -49,6 +49,7 @@ export const AppShell = ({ children }: { children: ReactNode }) => {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {navigation}
               <Button variant="outline" size="icon" className="rounded-full" asChild>
                 <a
                   href="/api-docs.html"

@@ -1,0 +1,50 @@
+package main
+
+import (
+	"testing"
+
+	"go.mau.fi/whatsmeow/types"
+)
+
+func TestRenderCampaignContent(t *testing.T) {
+	src := CampaignContent{
+		Kind:       "list",
+		Body:       "Olá, {{nome}}. Parcela: {{valor}}",
+		ButtonText: "Opções de {{nome}}",
+		Sections: []CampaignSection{{
+			Title: "Contrato {{contrato}}",
+			Rows:  []CampaignRow{{ID: "pagar_{{contrato}}", Title: "Pagar {{valor}}"}},
+		}},
+	}
+
+	got := renderCampaignContent(src, map[string]string{
+		"nome": "Ana", "valor": "R$ 100", "contrato": "42",
+	})
+
+	if got.Body != "Olá, Ana. Parcela: R$ 100" {
+		t.Fatalf("body não personalizado: %q", got.Body)
+	}
+	if got.ButtonText != "Opções de Ana" || got.Sections[0].Title != "Contrato 42" {
+		t.Fatalf("campos da lista não personalizados: %#v", got)
+	}
+	if got.Sections[0].Rows[0].ID != "pagar_42" || got.Sections[0].Rows[0].Title != "Pagar R$ 100" {
+		t.Fatalf("linha da lista não personalizada: %#v", got.Sections[0].Rows[0])
+	}
+	if src.Body != "Olá, {{nome}}. Parcela: {{valor}}" {
+		t.Fatal("render alterou o template original")
+	}
+}
+
+func TestBuildCampaignText(t *testing.T) {
+	msg, interactive, err := buildCampaignMessage(nil, typesJIDForTest(), CampaignContent{Kind: "text", Body: "Olá"})
+	if err != nil || interactive || msg.GetConversation() != "Olá" {
+		t.Fatalf("mensagem de texto inválida: msg=%v interactive=%v err=%v", msg, interactive, err)
+	}
+}
+
+// O tipo é produzido pelo mesmo parser usado pelos endpoints, evitando fixtures
+// de JID divergentes da versão do whatsmeow pinada pelo projeto.
+func typesJIDForTest() types.JID {
+	jid, _ := types.ParseJID("5511999999999@s.whatsapp.net")
+	return jid
+}

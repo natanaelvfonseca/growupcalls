@@ -88,6 +88,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/carousel", s.handleSendCarousel)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/form", s.handleSendForm)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/native-form", s.handleSendNativeForm)
+	// Campanhas personalizadas: processa a lista no servidor, aplica variáveis por
+	// destinatário e mantém o envio mesmo se o navegador for fechado.
+	mux.HandleFunc("POST /api/sessions/{sid}/campaigns", s.handleCampaignCreate)
+	mux.HandleFunc("GET /api/sessions/{sid}/campaigns", s.handleCampaignList)
+	mux.HandleFunc("GET /api/sessions/{sid}/campaigns/{id}", s.handleCampaignGet)
+	mux.HandleFunc("POST /api/sessions/{sid}/campaigns/{id}/cancel", s.handleCampaignCancel)
 	mux.HandleFunc("GET /api/sessions/{sid}/native-forms", s.handleListNativeForms)
 	mux.HandleFunc("POST /api/sessions/{sid}/schedule", s.handleSchedule)
 	mux.HandleFunc("GET /api/sessions/{sid}/schedule", s.handleListScheduled)
