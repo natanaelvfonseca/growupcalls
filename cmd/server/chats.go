@@ -149,7 +149,15 @@ func (s *server) handleCampaignSends(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range records {
-		records[i].Recipient = sess.callPeerOut(records[i].Recipient)
+		// Campanhas novas guardam o telefone puro; históricos antigos guardam
+		// JID. callPeerOut só aceita JID e devolvia vazio para os telefones novos.
+		if strings.Contains(records[i].Recipient, "@") {
+			if phone := sess.callPeerOut(records[i].Recipient); phone != "" {
+				records[i].Recipient = phone
+			}
+		} else {
+			records[i].Recipient = normalizePhone(records[i].Recipient)
+		}
 	}
 	// Se o formato antigo não preservou o envio, uma resposta interativa ainda é
 	// evidência suficiente de que aquele contato recebeu a campanha.

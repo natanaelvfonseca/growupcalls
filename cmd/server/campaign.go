@@ -166,27 +166,32 @@ func buildCampaignMessage(sess *Session, jid types.JID, c CampaignContent) (*waE
 			return nil, false, errors.New("adicione ao menos uma seção na lista")
 		}
 		if c.ListMode == "classic" {
-			listType := waE2E.ListMessage_SINGLE_SELECT
-			sections := make([]*waE2E.ListMessage_Section, 0, len(c.Sections))
+			// O servidor do WhatsApp passou a rejeitar ListMessage legado com
+			// erro 405 em algumas contas Multi-Device. No modo compatível usamos
+			// texto comum com as opções: funciona em todas as versões e mantém as
+			// respostas digitadas correlacionáveis pelo histórico.
+			text := strings.TrimSpace(c.Body)
+			missing := make([]string, 0)
 			for _, sec := range c.Sections {
-				rows := make([]*waE2E.ListMessage_Row, 0, len(sec.Rows))
-				for i, r := range sec.Rows {
-					id := r.ID
-					if id == "" {
-						id = "row_" + itoa(i+1)
+				for _, row := range sec.Rows {
+					title := strings.TrimSpace(row.Title)
+					if title == "" || strings.Contains(strings.ToLower(text), strings.ToLower(title)) {
+						continue
 					}
-					rows = append(rows, &waE2E.ListMessage_Row{Title: proto.String(r.Title), Description: proto.String(r.Description), RowID: proto.String(id)})
+					line := "• " + title
+					if description := strings.TrimSpace(row.Description); description != "" {
+						line += " — " + description
+					}
+					missing = append(missing, line)
 				}
-				sections = append(sections, &waE2E.ListMessage_Section{Title: proto.String(sec.Title), Rows: rows})
 			}
-			label := c.ButtonText
-			if label == "" {
-				label = "Ver opções"
+			if len(missing) > 0 {
+				text += "\n\nOpções:\n" + strings.Join(missing, "\n")
 			}
-			return &waE2E.Message{ListMessage: &waE2E.ListMessage{
-				Description: proto.String(c.Body), ButtonText: proto.String(label), FooterText: proto.String(c.Footer),
-				ListType: &listType, Sections: sections,
-			}}, false, nil
+			if footer := strings.TrimSpace(c.Footer); footer != "" && !strings.Contains(strings.ToLower(text), strings.ToLower(footer)) {
+				text += "\n\n" + footer
+			}
+			return &waE2E.Message{Conversation: proto.String(text)}, false, nil
 		}
 		type row struct {
 			Header      string `json:"header"`
