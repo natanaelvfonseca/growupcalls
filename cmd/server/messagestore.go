@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
+	"strings"
+	"unicode"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -239,7 +242,112 @@ func (s *sessionStore) listCampaignSends(ctx context.Context, sessionID string, 
 		}
 		out = append(out, record)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	return s.recoverCampaignTextEchoes(ctx, sessionID, out, limit)
+}
+
+// recoverCampaignTextEchoes cobre clientes que espelham no histórico uma lista
+// enviada como texto comum. Usamos os corpos das listas confirmadas como sementes
+// e só aceitamos mensagens muito semelhantes dentro da mesma janela de envio.
+func (s *sessionStore) recoverCampaignTextEchoes(ctx context.Context, sessionID string, records []campaignSendRecord, limit int) ([]campaignSendRecord, error) {
+	if len(records) == 0 {
+		return records, nil
+	}
+	seen := make(map[string]struct{}, len(records))
+	seeds := make([]map[string]struct{}, 0, len(records))
+	minTS, maxTS := records[0].Timestamp, records[0].Timestamp
+	for _, record := range records {
+		seen[record.MsgID] = struct{}{}
+		if record.Timestamp < minTS {
+			minTS = record.Timestamp
+		}
+		if record.Timestamp > maxTS {
+			maxTS = record.Timestamp
+		}
+		if tokens := campaignTokens(record.Body); len(tokens) >= 12 {
+			seeds = append(seeds, tokens)
+		}
+	}
+	if len(seeds) == 0 {
+		return records, nil
+	}
+	const window = int64(6 * 60 * 60 * 1000)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chat_jid, msg_id, ts, COALESCE(body, '')
+		FROM messages
+		WHERE session_id = $1 AND from_me = true AND COALESCE(body, '') <> ''
+		AND (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid')
+		AND ts BETWEEN $2 AND $3
+		ORDER BY ts DESC LIMIT 5000`, sessionID, minTS-window, maxTS+window)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var recipient, msgID, body string
+		var ts int64
+		if err := rows.Scan(&recipient, &msgID, &ts, &body); err != nil {
+			return nil, err
+		}
+		if _, ok := seen[msgID]; ok {
+			continue
+		}
+		tokens := campaignTokens(body)
+		matched := false
+		for _, seed := range seeds {
+			if campaignSimilarity(tokens, seed) >= 0.55 {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		seen[msgID] = struct{}{}
+		records = append(records, campaignSendRecord{
+			ID: "legacy-text:" + msgID, CampaignName: "Disparo recuperado",
+			Recipient: recipient, MsgID: msgID, Timestamp: ts, Kind: "text",
+			Body: body, Status: "sent",
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(records, func(i, j int) bool { return records[i].Timestamp > records[j].Timestamp })
+	if len(records) > limit {
+		records = records[:limit]
+	}
+	return records, nil
+}
+
+func campaignTokens(value string) map[string]struct{} {
+	words := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	out := make(map[string]struct{}, len(words))
+	for _, word := range words {
+		if len([]rune(word)) >= 3 {
+			out[word] = struct{}{}
+		}
+	}
+	return out
+}
+
+func campaignSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for token := range a {
+		if _, ok := b[token]; ok {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	return float64(intersection) / float64(union)
 }
 
 // searchMessages busca por texto no corpo das mensagens (ILIKE, case-insensitive).
