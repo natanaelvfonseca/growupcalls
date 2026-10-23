@@ -77,6 +77,19 @@ type storedMessage struct {
 	Raw       json.RawMessage `json:"raw,omitempty"`
 }
 
+type campaignSendRecord struct {
+	ID           string `json:"id"`
+	CampaignID   string `json:"campaignId"`
+	CampaignName string `json:"campaignName"`
+	Recipient    string `json:"recipient"`
+	MsgID        string `json:"msgId,omitempty"`
+	Timestamp    int64  `json:"timestamp"`
+	Kind         string `json:"kind"`
+	Body         string `json:"body"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+}
+
 // MarshalJSON acrescenta aliases no estilo WAHA (from/chatId) sem remover os
 // campos originais (id/body/timestamp/fromMe já coincidem com a WAHA).
 func (m storedMessage) MarshalJSON() ([]byte, error) {
@@ -178,6 +191,55 @@ func (s *sessionStore) listInteractiveResponses(ctx context.Context, sessionID s
 	}
 	defer rows.Close()
 	return scanMessages(rows)
+}
+
+func (s *sessionStore) saveCampaignSend(ctx context.Context, sessionID string, record campaignSendRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO campaign_sends (session_id, campaign_id, campaign_name, recipient, msg_id, ts, kind, body, status, last_error)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,NULLIF($10,''))
+		ON CONFLICT (session_id, msg_id) WHERE msg_id IS NOT NULL AND msg_id <> '' DO NOTHING`,
+		sessionID, record.CampaignID, record.CampaignName, record.Recipient, record.MsgID,
+		record.Timestamp, record.Kind, record.Body, record.Status, record.Error)
+	return err
+}
+
+// listCampaignSends combina a auditoria persistente das campanhas novas com
+// listas/botões antigos recuperados do histórico de mensagens.
+func (s *sessionStore) listCampaignSends(ctx context.Context, sessionID string, limit int) ([]campaignSendRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		WITH sent AS (
+			SELECT id::text, campaign_id, campaign_name, recipient, COALESCE(msg_id, ''), ts,
+				kind, COALESCE(body, ''), status, COALESCE(last_error, '')
+			FROM campaign_sends WHERE session_id = $1
+			UNION ALL
+			SELECT 'legacy:' || m.msg_id, '', 'Disparo recuperado', m.chat_jid, m.msg_id, m.ts,
+				CASE WHEN m.raw ? 'listMessage' THEN 'list'
+					WHEN m.raw ? 'interactiveMessage' THEN 'interactive'
+					WHEN m.raw ? 'buttonsMessage' OR m.raw #> '{documentWithCaptionMessage,message,buttonsMessage}' IS NOT NULL THEN 'buttons'
+					ELSE 'message' END,
+				COALESCE(m.body, ''), 'sent', ''
+			FROM messages m
+			WHERE m.session_id = $1 AND m.from_me = true
+			AND (m.chat_jid LIKE '%@s.whatsapp.net' OR m.chat_jid LIKE '%@lid')
+			AND (m.raw ? 'listMessage' OR m.raw ? 'interactiveMessage' OR m.raw ? 'buttonsMessage' OR
+				m.raw #> '{documentWithCaptionMessage,message,buttonsMessage}' IS NOT NULL)
+			AND NOT EXISTS (SELECT 1 FROM campaign_sends cs WHERE cs.session_id = m.session_id AND cs.msg_id = m.msg_id)
+		)
+		SELECT * FROM sent ORDER BY ts DESC LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []campaignSendRecord{}
+	for rows.Next() {
+		var record campaignSendRecord
+		if err := rows.Scan(&record.ID, &record.CampaignID, &record.CampaignName, &record.Recipient,
+			&record.MsgID, &record.Timestamp, &record.Kind, &record.Body, &record.Status, &record.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
 }
 
 // searchMessages busca por texto no corpo das mensagens (ILIKE, case-insensitive).

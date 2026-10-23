@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cancelCampaign, createCampaign, getCampaign, listCampaignResponses, listCampaigns, type CampaignButton, type CampaignJob, type CampaignRecipient, type CampaignResponse, type MessageKind } from "@/services/campaigns";
+import { cancelCampaign, createCampaign, getCampaign, listCampaignResponses, listCampaignSends, listCampaigns, type CampaignButton, type CampaignJob, type CampaignRecipient, type CampaignResponse, type CampaignSend, type MessageKind } from "@/services/campaigns";
 import { cn } from "@/lib/utils";
 
 const textareaClass = "min-h-28 w-full resize-y rounded-xl border border-input bg-transparent px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring";
@@ -90,6 +90,7 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
   const [sending, setSending] = useState(false);
   const [jobs, setJobs] = useState<CampaignJob[]>([]);
   const [responses, setResponses] = useState<CampaignResponse[]>([]);
+  const [sends, setSends] = useState<CampaignSend[]>([]);
 
   const preview = useMemo(() => {
     const vars = recipients[0]?.variables ?? { nome: "Maria", telefone: "5511999999999" };
@@ -112,10 +113,16 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
     catch { /* versão anterior durante deploy ou sessão trocando */ }
   };
 
+  const loadSends = async () => {
+    try { setSends((await listCampaignSends(sid)).sends); }
+    catch { /* versão anterior durante deploy ou sessão trocando */ }
+  };
+
   useEffect(() => {
     void loadJobs();
     void loadResponses();
-    const timer = window.setInterval(() => { void loadJobs(); void loadResponses(); }, 3000);
+    void loadSends();
+    const timer = window.setInterval(() => { void loadJobs(); void loadResponses(); void loadSends(); }, 3000);
     return () => window.clearInterval(timer);
   }, [sid]);
 
@@ -192,6 +199,8 @@ export const MessagesPage = ({ sid }: { sid: string }) => {
 
       <Card className="h-fit xl:sticky xl:top-0"><CardHeader><CardTitle>Prévia</CardTitle><CardDescription>Exemplo usando o primeiro lead da lista.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex flex-wrap gap-2">{[body, ...variations].map((_, index) => <button type="button" key={index} onClick={() => setPreviewIndex(index)} className={cn("rounded-full border px-2.5 py-1 text-xs", previewIndex === index ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>Versão {index + 1}</button>)}</div><div className="mx-auto max-w-sm rounded-2xl bg-[#e7ffdb] p-4 text-[15px] text-[#17221a] shadow-sm dark:bg-emerald-950 dark:text-emerald-50"><p className="whitespace-pre-wrap">{preview || "Sua mensagem aparecerá aqui."}</p>{kind === "list" && <button className="mt-3 w-full border-t border-emerald-900/10 pt-3 font-medium text-sky-700">{buttonText}</button>}{(kind === "buttons" || kind === "interactive") && <div className="mt-3 space-y-1 border-t border-emerald-900/10 pt-2">{buttons.map((b, i) => <div key={i} className="py-1.5 text-center font-medium text-sky-700">{b.displayText}</div>)}</div>}{kind !== "text" && footer && <p className="mt-2 text-xs opacity-60">{footer}</p>}</div></CardContent></Card>
     </div>
+
+    <Card><CardHeader className="flex-row items-start justify-between"><div><CardTitle>Mensagens disparadas</CardTitle><CardDescription>Destinatários que receberam as campanhas, inclusive listas recuperadas do histórico.</CardDescription></div><Button type="button" variant="outline" size="sm" onClick={() => void loadSends()}><RefreshCw className="h-4 w-4" /> Atualizar</Button></CardHeader><CardContent>{sends.length === 0 ? <p className="text-sm text-muted-foreground">Nenhum disparo foi encontrado no histórico desta conta.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead><tr className="border-b text-xs text-muted-foreground"><th className="px-3 py-2 font-medium">Destinatário</th><th className="px-3 py-2 font-medium">Campanha</th><th className="px-3 py-2 font-medium">Mensagem</th><th className="px-3 py-2 font-medium">Status</th><th className="px-3 py-2 font-medium">Data</th></tr></thead><tbody>{sends.map((send) => <tr key={send.id} className="border-b last:border-0"><td className="px-3 py-3 font-mono text-xs">+{send.recipient.split("@")[0]}</td><td className="px-3 py-3">{send.campaignName || "Campanha"}</td><td className="max-w-md px-3 py-3"><p className="line-clamp-2">{send.body || "Mensagem interativa"}</p></td><td className="px-3 py-3"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", send.status === "sent" ? "bg-emerald-500/10 text-emerald-700" : "bg-destructive/10 text-destructive")}>{send.status === "sent" ? "Enviada" : "Falhou"}</span></td><td className="px-3 py-3 text-muted-foreground">{new Date(send.timestamp).toLocaleString("pt-BR")}</td></tr>)}</tbody></table></div>}</CardContent></Card>
 
     <Card><CardHeader className="flex-row items-start justify-between"><div><CardTitle>Respostas recebidas</CardTitle><CardDescription>Cliques e mensagens dos contatos, inclusive das campanhas já enviadas.</CardDescription></div><Button type="button" variant="outline" size="sm" onClick={() => void loadResponses()}><RefreshCw className="h-4 w-4" /> Atualizar</Button></CardHeader><CardContent>{responses.length === 0 ? <p className="text-sm text-muted-foreground">Nenhuma resposta foi encontrada no histórico desta conta.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead><tr className="border-b text-xs text-muted-foreground"><th className="px-3 py-2 font-medium">Contato</th><th className="px-3 py-2 font-medium">Resposta</th><th className="px-3 py-2 font-medium">Data</th></tr></thead><tbody>{responses.map((response) => <tr key={response.id} className="border-b last:border-0"><td className="px-3 py-3 font-mono text-xs">+{response.chat.split("@")[0]}</td><td className="px-3 py-3 font-medium">{response.body || "Resposta recebida"}</td><td className="px-3 py-3 text-muted-foreground">{new Date(response.timestamp).toLocaleString("pt-BR")}</td></tr>)}</tbody></table></div>}</CardContent></Card>
 

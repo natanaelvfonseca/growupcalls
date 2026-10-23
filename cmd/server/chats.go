@@ -133,3 +133,22 @@ func (s *server) handleCampaignResponses(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"responses": responses})
 }
+
+// GET /api/sessions/{sid}/campaign-sends?limit=500
+// Destinatários e mensagens enviados por campanhas, persistentes entre deploys.
+func (s *server) handleCampaignSends(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	limit, _ := queryPage(r, 500)
+	records, err := s.sessions.store.listCampaignSends(r.Context(), sess.id, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	for i := range records {
+		records[i].Recipient = sess.callPeerOut(records[i].Recipient)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sends": records})
+}

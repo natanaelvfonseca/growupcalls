@@ -72,3 +72,19 @@ export interface CampaignResponse {
 
 export const listCampaignResponses = (sid: string) =>
   apiGet<{ responses: CampaignResponse[] }>(`/api/sessions/${sid}/campaign-responses?limit=500`);
+
+export interface CampaignSend {
+  id: string;
+  campaignId: string;
+  campaignName: string;
+  recipient: string;
+  msgId?: string;
+  timestamp: number;
+  kind: MessageKind | "message";
+  body: string;
+  status: "sent" | "failed";
+  error?: string;
+}
+
+export const listCampaignSends = (sid: string) =>
+  apiGet<{ sends: CampaignSend[] }>(`/api/sessions/${sid}/campaign-sends?limit=500`);

@@ -88,6 +88,26 @@ func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (session_id, chat_jid, ts DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_session_ts ON messages (session_id, ts DESC)`)
 
+	// Auditoria dos disparos em massa. Diferente dos jobs em memória, esta tabela
+	// sobrevive a deploys e permite ao painel mostrar exatamente quem recebeu.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS campaign_sends (
+		id            BIGSERIAL PRIMARY KEY,
+		session_id    TEXT NOT NULL,
+		campaign_id   TEXT NOT NULL,
+		campaign_name TEXT NOT NULL,
+		recipient     TEXT NOT NULL,
+		msg_id        TEXT,
+		ts            BIGINT NOT NULL,
+		kind          TEXT NOT NULL,
+		body          TEXT,
+		status        TEXT NOT NULL,
+		last_error    TEXT
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS campaign_sends_session_ts ON campaign_sends (session_id, ts DESC)`)
+	_, _ = db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS campaign_sends_message ON campaign_sends (session_id, msg_id) WHERE msg_id IS NOT NULL AND msg_id <> ''`)
+
 	// Mensagens agendadas (send_at). A mensagem já vem montada (mídia já subida) e
 	// serializada em protojson; o worker (scheduled.go) envia na hora marcada.
 	// Sobrevive a restart.

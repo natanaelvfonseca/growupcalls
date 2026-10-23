@@ -293,6 +293,19 @@ func (m *campaignManager) run(sess *Session, job *campaignJob, req campaignReque
 		if err != nil {
 			result.Error = err.Error()
 		}
+		status := "failed"
+		if result.OK {
+			status = "sent"
+		}
+		content := renderCampaignContent(req.Content, recipient.Variables)
+		if len(content.Variants) > 0 {
+			content.Body = content.Variants[i%len(content.Variants)]
+		}
+		_ = sess.mgr.store.saveCampaignSend(context.Background(), sess.id, campaignSendRecord{
+			CampaignID: job.ID, CampaignName: job.Name, Recipient: recipient.Phone,
+			MsgID: result.MsgID, Timestamp: time.Now().UnixMilli(), Kind: job.Kind,
+			Body: content.Body, Status: status, Error: result.Error,
+		})
 		m.mu.Lock()
 		job.Results = append(job.Results, result)
 		if result.OK {
