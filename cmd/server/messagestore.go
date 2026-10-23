@@ -81,16 +81,83 @@ type storedMessage struct {
 }
 
 type campaignSendRecord struct {
-	ID           string `json:"id"`
-	CampaignID   string `json:"campaignId"`
-	CampaignName string `json:"campaignName"`
-	Recipient    string `json:"recipient"`
-	MsgID        string `json:"msgId,omitempty"`
-	Timestamp    int64  `json:"timestamp"`
-	Kind         string `json:"kind"`
-	Body         string `json:"body"`
-	Status       string `json:"status"`
-	Error        string `json:"error,omitempty"`
+	ID            string `json:"id"`
+	CampaignID    string `json:"campaignId"`
+	CampaignName  string `json:"campaignName"`
+	Recipient     string `json:"recipient"`
+	MsgID         string `json:"msgId,omitempty"`
+	Timestamp     int64  `json:"timestamp"`
+	Kind          string `json:"kind"`
+	Body          string `json:"body"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
+	ReceiptStatus string `json:"receiptStatus,omitempty"`
+	ReceiptTS     int64  `json:"receiptTimestamp,omitempty"`
+}
+
+func receiptPriority(status string) int {
+	switch status {
+	case "played":
+		return 4
+	case "read":
+		return 3
+	case "delivered":
+		return 2
+	case "sent":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func normalizeReceiptStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.Contains(value, "played"):
+		return "played"
+	case strings.Contains(value, "read"):
+		return "read"
+	case strings.Contains(value, "deliver"):
+		return "delivered"
+	default:
+		return ""
+	}
+}
+
+// saveMessageReceipts persiste o melhor estado conhecido para cada mensagem.
+// Recibos podem chegar fora de ordem, então um "delivered" tardio nunca reduz
+// uma mensagem que já estava como "read".
+func (s *sessionStore) saveMessageReceipts(ctx context.Context, sessionID, chatJID, status string, ts int64, messageIDs []types.MessageID) error {
+	status = normalizeReceiptStatus(status)
+	if status == "" || len(messageIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, messageID := range messageIDs {
+		id := strings.TrimSpace(string(messageID))
+		if id == "" {
+			continue
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO message_receipts (session_id, msg_id, chat_jid, status, ts)
+			VALUES ($1,$2,NULLIF($3,''),$4,$5)
+			ON CONFLICT (session_id, msg_id) DO UPDATE SET
+				chat_jid = COALESCE(EXCLUDED.chat_jid, message_receipts.chat_jid),
+				status = CASE
+					WHEN CASE EXCLUDED.status WHEN 'played' THEN 4 WHEN 'read' THEN 3 WHEN 'delivered' THEN 2 ELSE 1 END
+						>= CASE message_receipts.status WHEN 'played' THEN 4 WHEN 'read' THEN 3 WHEN 'delivered' THEN 2 ELSE 1 END
+					THEN EXCLUDED.status ELSE message_receipts.status END,
+				ts = GREATEST(message_receipts.ts, EXCLUDED.ts)`,
+			sessionID, id, chatJID, status, ts)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // MarshalJSON acrescenta aliases no estilo WAHA (from/chatId) sem remover os
@@ -210,7 +277,7 @@ func (s *sessionStore) saveCampaignSend(ctx context.Context, sessionID string, r
 // listas/botões antigos recuperados do histórico de mensagens.
 func (s *sessionStore) listCampaignSends(ctx context.Context, sessionID string, limit int) ([]campaignSendRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		WITH sent AS (
+		WITH sent (id, campaign_id, campaign_name, recipient, msg_id, ts, kind, body, status, last_error) AS (
 			SELECT id::text, campaign_id, campaign_name, recipient, COALESCE(msg_id, ''), ts,
 				kind, COALESCE(body, ''), status, COALESCE(last_error, '')
 			FROM campaign_sends WHERE session_id = $1
@@ -228,7 +295,10 @@ func (s *sessionStore) listCampaignSends(ctx context.Context, sessionID string, 
 				m.raw #> '{documentWithCaptionMessage,message,buttonsMessage}' IS NOT NULL)
 			AND NOT EXISTS (SELECT 1 FROM campaign_sends cs WHERE cs.session_id = m.session_id AND cs.msg_id = m.msg_id)
 		)
-		SELECT * FROM sent ORDER BY ts DESC LIMIT $2`, sessionID, limit)
+		SELECT sent.*, COALESCE(mr.status, ''), COALESCE(mr.ts, 0)
+		FROM sent
+		LEFT JOIN message_receipts mr ON mr.session_id = $1 AND mr.msg_id = sent.msg_id
+		ORDER BY sent.ts DESC LIMIT $2`, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +307,8 @@ func (s *sessionStore) listCampaignSends(ctx context.Context, sessionID string, 
 	for rows.Next() {
 		var record campaignSendRecord
 		if err := rows.Scan(&record.ID, &record.CampaignID, &record.CampaignName, &record.Recipient,
-			&record.MsgID, &record.Timestamp, &record.Kind, &record.Body, &record.Status, &record.Error); err != nil {
+			&record.MsgID, &record.Timestamp, &record.Kind, &record.Body, &record.Status, &record.Error,
+			&record.ReceiptStatus, &record.ReceiptTS); err != nil {
 			return nil, err
 		}
 		out = append(out, record)

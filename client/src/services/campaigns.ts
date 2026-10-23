@@ -84,6 +84,8 @@ export interface CampaignSend {
   body: string;
   status: "sent" | "failed";
   error?: string;
+  receiptStatus?: "delivered" | "read" | "played";
+  receiptTimestamp?: number;
 }
 
 export const listCampaignSends = (sid: string) =>

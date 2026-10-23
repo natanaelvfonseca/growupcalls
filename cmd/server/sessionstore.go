@@ -108,6 +108,21 @@ func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS campaign_sends_session_ts ON campaign_sends (session_id, ts DESC)`)
 	_, _ = db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS campaign_sends_message ON campaign_sends (session_id, msg_id) WHERE msg_id IS NOT NULL AND msg_id <> ''`)
 
+	// Recibos emitidos pelo WhatsApp para mensagens de saída. A tabela é separada
+	// da auditoria de campanhas porque o recibo pode chegar antes de o worker
+	// terminar de gravar campaign_sends. O vínculo posterior é feito por msg_id.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS message_receipts (
+		session_id TEXT NOT NULL,
+		msg_id     TEXT NOT NULL,
+		chat_jid   TEXT,
+		status     TEXT NOT NULL,
+		ts         BIGINT NOT NULL,
+		PRIMARY KEY (session_id, msg_id)
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS message_receipts_session_ts ON message_receipts (session_id, ts DESC)`)
+
 	// Mensagens agendadas (send_at). A mensagem já vem montada (mídia já subida) e
 	// serializada em protojson; o worker (scheduled.go) envia na hora marcada.
 	// Sobrevive a restart.

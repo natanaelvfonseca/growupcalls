@@ -817,6 +817,11 @@ func (s *Session) handleEvent(rawEvt any) {
 			go s.handleUnavailableViewOnce(evt)
 		}
 	case *events.Receipt:
+		if s.mgr.store != nil {
+			go func() {
+				_ = s.mgr.store.saveMessageReceipts(s.mgr.appCtx, s.id, evt.Chat.String(), string(evt.Type), evt.Timestamp.UnixMilli(), evt.MessageIDs)
+			}()
+		}
 		s.dispatchWebhook("receipt", map[string]any{
 			"chat": evt.Chat.String(), "sender": evt.Sender.String(),
 			"type": string(evt.Type), "ids": evt.MessageIDs,

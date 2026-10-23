@@ -59,6 +59,24 @@ func TestBuildCampaignClassicList(t *testing.T) {
 	}
 }
 
+func TestNormalizeReceiptStatus(t *testing.T) {
+	cases := map[string]string{
+		"delivered": "delivered",
+		"read":      "read",
+		"read-self": "read",
+		"played":    "played",
+		"sender":    "",
+	}
+	for input, want := range cases {
+		if got := normalizeReceiptStatus(input); got != want {
+			t.Fatalf("normalizeReceiptStatus(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if receiptPriority("delivered") >= receiptPriority("read") || receiptPriority("read") >= receiptPriority("played") {
+		t.Fatal("prioridade dos recibos está fora de ordem")
+	}
+}
+
 // O tipo é produzido pelo mesmo parser usado pelos endpoints, evitando fixtures
 // de JID divergentes da versão do whatsmeow pinada pelo projeto.
 func typesJIDForTest() types.JID {
