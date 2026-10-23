@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -150,5 +151,27 @@ func (s *server) handleCampaignSends(w http.ResponseWriter, r *http.Request) {
 	for i := range records {
 		records[i].Recipient = sess.callPeerOut(records[i].Recipient)
 	}
+	// Se o formato antigo não preservou o envio, uma resposta interativa ainda é
+	// evidência suficiente de que aquele contato recebeu a campanha.
+	knownRecipients := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		knownRecipients[record.Recipient] = struct{}{}
+	}
+	responses, responseErr := s.sessions.store.listInteractiveResponses(r.Context(), sess.id, limit)
+	if responseErr == nil {
+		for _, response := range responses {
+			recipient := sess.callPeerOut(response.ChatJID)
+			if _, exists := knownRecipients[recipient]; exists {
+				continue
+			}
+			knownRecipients[recipient] = struct{}{}
+			records = append(records, campaignSendRecord{
+				ID: "response-proof:" + response.MsgID, CampaignName: "Confirmado pela resposta",
+				Recipient: recipient, Timestamp: response.Timestamp, Kind: "message",
+				Body: "Resposta recebida: " + response.Body, Status: "sent",
+			})
+		}
+	}
+	sort.SliceStable(records, func(i, j int) bool { return records[i].Timestamp > records[j].Timestamp })
 	writeJSON(w, http.StatusOK, map[string]any{"sends": records})
 }
