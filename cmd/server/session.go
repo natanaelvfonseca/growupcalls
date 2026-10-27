@@ -996,6 +996,12 @@ func (s *Session) setAuth(a AuthSnapshot) {
 	s.mgr.broker.emitSessionList(s.mgr.infos())
 }
 
+func (s *Session) authSnapshot() AuthSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.auth
+}
+
 // notifyDisconnected avisa — UMA vez por queda — que a sessão do WhatsApp caiu:
 // dispara o webhook "session_status" e posta um alerta na inbox do Chatwoot para
 // o atendente ver que precisa reconectar. reason descreve o que houve; action é a

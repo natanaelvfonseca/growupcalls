@@ -32,6 +32,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.handleSessionDelete)
 	mux.HandleFunc("POST /api/sessions/{sid}/logout", s.handleSessionLogout)
 	mux.HandleFunc("POST /api/sessions/{sid}/pair", s.handleSessionPair)
+	mux.HandleFunc("GET /api/sessions/{sid}/auth", s.handleSessionAuth)
 	mux.HandleFunc("POST /api/sessions/{sid}/pair-code", s.handleSessionPairCode)
 	mux.HandleFunc("POST /api/sessions/{sid}/pair-passkey", s.handlePairPasskey)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls", s.handleStartCall)
@@ -515,6 +516,18 @@ func (s *server) handleSessionPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/sessions/{sid}/auth devolve somente o estado corrente do
+// pareamento. A rota é protegida pela chave da API como o restante de /api e
+// permite que o painel central faça proxy do QR sem abrir o SSE global nem
+// expor a chave mestra ao navegador.
+func (s *server) handleSessionAuth(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, sess.authSnapshot())
 }
 
 // POST /api/sessions/{sid}/pair-code {phone}  → pareamento por código (sem QR)
