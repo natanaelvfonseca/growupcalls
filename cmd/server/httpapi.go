@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -284,7 +289,7 @@ func (s *server) routes() http.Handler {
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, X-API-Key, X-Webhook-Signature, X-Event-ID, X-Event-Type, Idempotency-Key")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -317,6 +322,13 @@ func withAuth(h http.Handler, key, widgetKey string) http.Handler {
 				h.ServeHTTP(w, r) // chave-mestra: libera tudo
 				return
 			}
+			// O sistema Jovem Aprendiz assina o corpo com HMAC-SHA256 usando o
+			// segredo configurado no endpoint. Aceitamos essa assinatura apenas
+			// nesta rota, sem abrir as demais APIs para chamadas externas.
+			if r.Method == http.MethodPost && p == "/api/integrations/jovem-aprendiz/webhook" && verifyJovemAprendizSignature(r, key) {
+				h.ServeHTTP(w, r)
+				return
+			}
 			// Superfície de widget: chave estática (por instância) OU token efêmero (por conta).
 			if widgetAllowed(r) {
 				if widgetKey != "" && got == widgetKey {
@@ -338,6 +350,23 @@ func withAuth(h http.Handler, key, widgetKey string) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func verifyJovemAprendizSignature(r *http.Request, key string) bool {
+	signature := strings.TrimSpace(r.Header.Get("X-Webhook-Signature"))
+	signature = strings.TrimPrefix(signature, "sha256=")
+	provided, err := hex.DecodeString(signature)
+	if err != nil || len(provided) != sha256.Size || r.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 {
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	mac := hmac.New(sha256.New, []byte(key))
+	_, _ = mac.Write(body)
+	return hmac.Equal(provided, mac.Sum(nil))
 }
 
 // widgetAllowed diz se a rota faz parte da superfície mínima do widget do

@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { getApiBase } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { listJovemAprendizDispatches, listMessageTemplates, saveMessageTemplate, type IntegrationDispatch, type MessageTemplate } from "@/services/integrations";
+import { listJovemAprendizDispatches, listMessageTemplates, saveMessageTemplate, sendJovemAprendizTest, type IntegrationDispatch, type MessageTemplate } from "@/services/integrations";
 
 const textareaClass = "min-h-28 w-full resize-y rounded-xl border border-input bg-transparent px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring";
 const emptyForm = { id: "", name: "", body: "", variants: [] as string[], delaySeconds: 5, jitterSeconds: 2, active: true };
@@ -27,6 +27,8 @@ export const WebhooksPage = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState<"url" | "payload" | null>(null);
+	const [testForm, setTestForm] = useState({ studentName: "Aluno Teste", studentPhone: "", guardianName: "Responsável Teste", guardianPhone: "", templateId: "prova-concluida" });
+	const [testing, setTesting] = useState(false);
 
   const base = getApiBase() || window.location.origin;
   const webhookUrl = `${base}/api/integrations/jovem-aprendiz/webhook`;
@@ -109,6 +111,36 @@ export const WebhooksPage = () => {
     toast.success(kind === "url" ? "URL copiada" : "Exemplo copiado");
   };
 
+	const sendTest = async () => {
+		if (!testForm.studentPhone.trim() || !testForm.guardianPhone.trim()) {
+			toast.error("Informe os dois telefones de teste.");
+			return;
+		}
+		if (!templates.some((item) => item.id === testForm.templateId && item.active)) {
+			toast.error("Crie e ative o modelo selecionado antes do teste.");
+			return;
+		}
+		setTesting(true);
+		try {
+			const result = await sendJovemAprendizTest({
+				event_id: `teste-painel-${Date.now()}`,
+				type: "exam.completed",
+				data: { template_id: testForm.templateId, score_percent: 80 },
+				student: {
+					name: testForm.studentName,
+					phone: testForm.studentPhone,
+					guardian: { name: testForm.guardianName, phone: testForm.guardianPhone },
+				},
+			});
+			toast.success(`Evento aceito para ${result.dispatch.recipientCount} destinatário(s).`);
+			await load(true);
+		} catch (error) {
+			toast.error(`Teste não enviado: ${(error as Error).message}`);
+		} finally {
+			setTesting(false);
+		}
+	};
+
   if (loading) return <div className="flex min-h-64 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>;
 
   return <div className="space-y-6">
@@ -124,6 +156,19 @@ export const WebhooksPage = () => {
         <details className="rounded-xl border bg-muted/20 p-4"><summary className="cursor-pointer font-medium">Ver exemplo do JSON</summary><div className="mt-3 flex items-start gap-2"><pre className="min-w-0 flex-1 overflow-x-auto rounded-xl bg-zinc-950 p-4 text-xs text-zinc-100">{payload}</pre><Button size="icon" variant="outline" onClick={() => void copy("payload", payload)} aria-label="Copiar JSON">{copied === "payload" ? <Check /> : <Clipboard />}</Button></div></details>
       </CardContent>
     </Card>
+
+		<Card>
+			<CardHeader><CardTitle>Testar evento da prova</CardTitle><CardDescription>Simula exatamente o evento exam.completed com aluno e responsável. As mensagens são reais e usam o modelo selecionado.</CardDescription></CardHeader>
+			<CardContent className="space-y-4">
+				<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+					<div className="space-y-2"><Label>Nome do aluno</Label><Input value={testForm.studentName} onChange={(e) => setTestForm({ ...testForm, studentName: e.target.value })} /></div>
+					<div className="space-y-2"><Label>WhatsApp do aluno</Label><Input value={testForm.studentPhone} onChange={(e) => setTestForm({ ...testForm, studentPhone: e.target.value })} placeholder="5512999999999" /></div>
+					<div className="space-y-2"><Label>Nome do responsável</Label><Input value={testForm.guardianName} onChange={(e) => setTestForm({ ...testForm, guardianName: e.target.value })} /></div>
+					<div className="space-y-2"><Label>WhatsApp do responsável</Label><Input value={testForm.guardianPhone} onChange={(e) => setTestForm({ ...testForm, guardianPhone: e.target.value })} placeholder="5512988888888" /></div>
+				</div>
+				<div className="flex flex-wrap items-end justify-between gap-3"><div className="min-w-64 space-y-2"><Label>Modelo</Label><select className="h-9 w-full rounded-xl border border-input bg-card px-3 text-sm" value={testForm.templateId} onChange={(e) => setTestForm({ ...testForm, templateId: e.target.value })}><option value="prova-concluida">prova-concluida</option>{templates.filter((item) => item.id !== "prova-concluida").map((item) => <option key={item.id} value={item.id}>{item.name} ({item.id})</option>)}</select></div><Button onClick={() => void sendTest()} disabled={testing}>{testing ? <Loader2 className="animate-spin" /> : <Webhook />} Enviar teste real</Button></div>
+			</CardContent>
+		</Card>
 
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,.75fr)]">
       <Card>

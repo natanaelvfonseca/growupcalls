@@ -1,4 +1,4 @@
-import { apiGet, apiPut } from "@/lib/api";
+import { apiGet, apiPost, apiPut } from "@/lib/api";
 import type { CampaignContent, MessageKind } from "@/services/campaigns";
 
 export interface MessageTemplate {
@@ -44,3 +44,6 @@ export const saveMessageTemplate = (id: string, input: TemplateInput) =>
 
 export const listJovemAprendizDispatches = () =>
   apiGet<{ dispatches: IntegrationDispatch[] }>("/api/integrations/jovem-aprendiz/dispatches?limit=100");
+
+export const sendJovemAprendizTest = (payload: unknown) =>
+  apiPost<{ duplicate: boolean; dispatch: IntegrationDispatch }>("/api/integrations/jovem-aprendiz/webhook", payload);

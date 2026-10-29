@@ -49,6 +49,7 @@ type integrationDispatch struct {
 }
 
 type inboundDispatchRequest struct {
+	Type                  string            `json:"type"`
 	EventIDCamel          string            `json:"eventId"`
 	EventIDSnake          string            `json:"event_id"`
 	ID                    string            `json:"id"`
@@ -80,7 +81,18 @@ func (r inboundDispatchRequest) templateID() string {
 	if value := strings.TrimSpace(r.TemplateCamel); value != "" {
 		return value
 	}
-	return strings.TrimSpace(r.TemplateSnake)
+	if value := strings.TrimSpace(r.TemplateSnake); value != "" {
+		return value
+	}
+	for _, key := range []string{"template_id", "templateId"} {
+		if value := scalarString(r.Data[key]); value != "" {
+			return value
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Type), "exam.completed") {
+		return "prova-concluida"
+	}
+	return ""
 }
 
 func scalarString(value any) string {
@@ -107,11 +119,35 @@ func (r inboundDispatchRequest) normalized() ([]string, map[string]string, []str
 	phones = append(phones, r.Phone, r.Phone2, r.Telefone, r.Telefone2)
 	for _, bag := range []map[string]any{r.Data, r.Student, r.Aluno} {
 		for key, raw := range bag {
+			if strings.EqualFold(strings.TrimSpace(key), "guardian") || strings.EqualFold(strings.TrimSpace(key), "responsavel") {
+				if guardian, ok := raw.(map[string]any); ok {
+					if name := scalarString(guardian["name"]); name != "" {
+						variables["responsavel"] = name
+						variables["guardian_name"] = name
+					}
+					phone := scalarString(guardian["phone"])
+					if phone == "" {
+						phone = scalarString(guardian["telefone"])
+					}
+					if phone != "" {
+						phones = append(phones, phone)
+						variables["telefone_responsavel"] = phone
+						variables["guardian_phone"] = phone
+					}
+				}
+				continue
+			}
 			value := scalarString(raw)
 			if value == "" {
 				continue
 			}
 			variables[key] = value
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "name", "nome", "full_name":
+				variables["nome"] = value
+			case "score_percent", "percentual", "nota":
+				variables["nota"] = value
+			}
 			switch strings.ToLower(strings.TrimSpace(key)) {
 			case "phone", "phone_1", "phone1", "telefone", "telefone_1", "telefone1", "celular", "whatsapp":
 				phones = append(phones, value)
