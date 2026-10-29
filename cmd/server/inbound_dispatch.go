@@ -239,6 +239,30 @@ func (s *sessionStore) getDispatch(ctx context.Context, source, eventID string) 
 	return d, err
 }
 
+func (s *sessionStore) listDispatches(ctx context.Context, source string, limit int) ([]integrationDispatch, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT source,event_id,template_id,status,recipient_count,jobs,COALESCE(last_error,''),created_at,updated_at FROM integration_dispatches WHERE source=$1 ORDER BY created_at DESC LIMIT $2`, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []integrationDispatch{}
+	for rows.Next() {
+		var d integrationDispatch
+		var jobs []byte
+		if err := rows.Scan(&d.Source, &d.EventID, &d.TemplateID, &d.Status, &d.RecipientCount, &jobs, &d.Error, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(jobs, &d.Jobs); err != nil {
+			return nil, err
+		}
+		items = append(items, d)
+	}
+	return items, rows.Err()
+}
+
 func (s *sessionStore) finishDispatch(ctx context.Context, d integrationDispatch) error {
 	jobs, _ := json.Marshal(d.Jobs)
 	d.UpdatedAt = time.Now().UnixMilli()
@@ -313,6 +337,16 @@ func (s *server) handleJovemAprendizDispatchGet(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+func (s *server) handleJovemAprendizDispatchList(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.sessions.store.listDispatches(r.Context(), jovemAprendizSource, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "não foi possível carregar os eventos"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dispatches": items})
 }
 
 func (s *server) handleMessageTemplateGet(w http.ResponseWriter, r *http.Request) {

@@ -30,6 +30,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/message-templates/{id}", s.handleMessageTemplateGet)
 	mux.HandleFunc("PUT /api/message-templates/{id}", s.handleMessageTemplatePut)
 	mux.HandleFunc("POST /api/integrations/jovem-aprendiz/webhook", s.handleJovemAprendizWebhook)
+	mux.HandleFunc("GET /api/integrations/jovem-aprendiz/dispatches", s.handleJovemAprendizDispatchList)
 	mux.HandleFunc("GET /api/integrations/jovem-aprendiz/dispatches/{eventId}", s.handleJovemAprendizDispatchGet)
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
