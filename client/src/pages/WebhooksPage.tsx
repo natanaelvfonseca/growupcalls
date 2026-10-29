@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Clipboard, Code2, Loader2, Pencil, Plus, RefreshCw, Save, Webhook } from "lucide-react";
+import { Check, Clipboard, Code2, ListChecks, Loader2, MessageSquareText, MousePointerClick, Pencil, Play, Plus, RefreshCw, Save, Trash2, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,9 +10,23 @@ import { Switch } from "@/components/ui/switch";
 import { getApiBase } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { listJovemAprendizDispatches, listMessageTemplates, saveMessageTemplate, sendJovemAprendizTest, type IntegrationDispatch, type MessageTemplate } from "@/services/integrations";
+import type { CampaignButton, MessageKind } from "@/services/campaigns";
 
 const textareaClass = "min-h-28 w-full resize-y rounded-xl border border-input bg-transparent px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring";
-const emptyForm = { id: "", name: "", body: "", variants: [] as string[], delaySeconds: 5, jitterSeconds: 2, active: true };
+const emptyForm = {
+  id: "", name: "", kind: "text" as MessageKind, body: "", variants: [] as string[], footer: "",
+  buttonText: "Ver opções", listMode: "classic" as "classic" | "native",
+  buttons: [] as CampaignButton[],
+  rows: [] as Array<{ id: string; title: string; description?: string }>,
+  delaySeconds: 5, jitterSeconds: 2, active: true,
+};
+
+const kindOptions: Array<{ value: MessageKind; label: string; icon: typeof MessageSquareText }> = [
+  { value: "text", label: "Texto", icon: MessageSquareText },
+  { value: "buttons", label: "Respostas", icon: MousePointerClick },
+  { value: "interactive", label: "Ações", icon: Play },
+  { value: "list", label: "Lista", icon: ListChecks },
+];
 
 const dispatchStatus: Record<IntegrationDispatch["status"], { label: string; className: string }> = {
   processing: { label: "Processando", className: "bg-amber-500/10 text-amber-700" },
@@ -68,8 +82,14 @@ export const WebhooksPage = () => {
   const editTemplate = (template: MessageTemplate) => setForm({
     id: template.id,
     name: template.name,
+    kind: template.content.kind,
     body: template.content.body || template.content.variants?.[0] || "",
     variants: (template.content.variants ?? []).filter((item) => item !== template.content.body),
+    footer: template.content.footer ?? "",
+    buttonText: template.content.buttonText ?? "Ver opções",
+    listMode: template.content.listMode ?? "classic",
+    buttons: template.content.buttons ?? [],
+    rows: template.content.sections?.[0]?.rows ?? [],
     delaySeconds: Math.max(1, Math.round(template.delayMs / 1000)),
     jitterSeconds: Math.max(0, Math.round(template.jitterMs / 1000)),
     active: template.active,
@@ -81,6 +101,18 @@ export const WebhooksPage = () => {
       toast.error("Preencha o identificador, o nome e a mensagem principal.");
       return;
     }
+    if ((form.kind === "buttons" || form.kind === "interactive") && !form.buttons.length) {
+      toast.error("Adicione pelo menos um botão.");
+      return;
+    }
+    if (form.kind === "buttons" && form.buttons.length > 3) {
+      toast.error("Respostas rápidas aceitam no máximo 3 botões.");
+      return;
+    }
+    if (form.kind === "list" && !form.rows.length) {
+      toast.error("Adicione pelo menos uma opção à lista.");
+      return;
+    }
     setSaving(true);
     try {
       const saved = await saveMessageTemplate(id, {
@@ -89,9 +121,14 @@ export const WebhooksPage = () => {
         delayMs: Math.max(1, form.delaySeconds) * 1000,
         jitterMs: Math.max(0, form.jitterSeconds) * 1000,
         content: {
-          kind: "text",
+          kind: form.kind,
           body: form.body.trim(),
           variants: [form.body, ...form.variants].map((value) => value.trim()).filter(Boolean),
+          footer: form.footer.trim(),
+          buttonText: form.buttonText.trim(),
+          listMode: form.listMode,
+          buttons: form.kind === "buttons" || form.kind === "interactive" ? form.buttons : undefined,
+          sections: form.kind === "list" ? [{ title: "Opções", rows: form.rows }] : undefined,
         },
       });
       setTemplates((current) => [saved, ...current.filter((item) => item.id !== saved.id)].sort((a, b) => a.name.localeCompare(b.name)));
@@ -175,8 +212,21 @@ export const WebhooksPage = () => {
         <CardHeader><CardTitle className="flex items-center gap-2"><Code2 className="h-5 w-5" /> Modelo de mensagem</CardTitle><CardDescription>Crie textos com variáveis. O sistema alterna as variações entre os destinatários.</CardDescription></CardHeader>
         <CardContent className="space-y-5">
           <div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label>Identificador do modelo</Label><Input value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} placeholder="primeiro-contato" /><p className="text-xs text-muted-foreground">É o template_id enviado pelo webhook.</p></div><div className="space-y-2"><Label>Nome</Label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Primeiro contato" /></div></div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{kindOptions.map((option) => <button type="button" key={option.value} onClick={() => setForm({ ...form, kind: option.value })} className={cn("flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm transition-colors", form.kind === option.value ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-accent")}><option.icon className="h-4 w-4" />{option.label}</button>)}</div>
           <div className="space-y-2"><Label>Mensagem principal</Label><textarea className={textareaClass} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} placeholder="Olá {{nome}}, podemos falar sobre o programa {{programa}}?" /><p className="text-xs text-muted-foreground">Variáveis disponíveis são os campos recebidos no webhook, por exemplo: {`{{nome}}`}, {`{{programa}}`} e {`{{curso}}`}.</p></div>
           <div className="space-y-3"><div className="flex items-center justify-between"><div><Label>Variações</Label><p className="mt-1 text-xs text-muted-foreground">Mensagens diferentes reduzem repetição nos disparos.</p></div><Button variant="outline" size="sm" onClick={() => setForm({ ...form, variants: [...form.variants, ""] })}><Plus /> Variação</Button></div>{form.variants.map((variant, index) => <div key={index} className="flex items-start gap-2"><textarea className={cn(textareaClass, "min-h-20")} value={variant} onChange={(e) => setForm({ ...form, variants: form.variants.map((item, i) => i === index ? e.target.value : item) })} placeholder={`Variação ${index + 1}`} /><Button variant="ghost" size="sm" onClick={() => setForm({ ...form, variants: form.variants.filter((_, i) => i !== index) })}>Remover</Button></div>)}</div>
+          {form.kind !== "text" && <div className="space-y-2"><Label>Rodapé</Label><Input value={form.footer} onChange={(e) => setForm({ ...form, footer: e.target.value })} placeholder="Programa Jovem Aprendiz" /></div>}
+
+          {(form.kind === "buttons" || form.kind === "interactive") && <div className="space-y-3"><div className="flex items-center justify-between"><Label>Botões {form.kind === "buttons" && "(máximo 3)"}</Label><Button type="button" variant="outline" size="sm" disabled={form.kind === "buttons" && form.buttons.length >= 3} onClick={() => setForm({ ...form, buttons: [...form.buttons, { type: form.kind === "buttons" ? "quick_reply" : "cta_url", displayText: "Novo botão", id: `acao_${form.buttons.length + 1}` }] })}>Adicionar</Button></div>
+            {form.buttons.map((button, index) => <div key={index} className="grid gap-2 rounded-xl border bg-muted/30 p-3 sm:grid-cols-[140px_1fr_1fr_auto]">
+              <select className="h-9 rounded-md border bg-card px-2 text-sm" value={form.kind === "buttons" ? "quick_reply" : button.type} disabled={form.kind === "buttons"} onChange={(e) => setForm({ ...form, buttons: form.buttons.map((item, i) => i === index ? { ...item, type: e.target.value as CampaignButton["type"] } : item) })}><option value="quick_reply">Resposta</option><option value="cta_url">Abrir link</option><option value="cta_copy">Copiar código</option><option value="cta_call">Ligar</option></select>
+              <Input value={button.displayText} onChange={(e) => setForm({ ...form, buttons: form.buttons.map((item, i) => i === index ? { ...item, displayText: e.target.value } : item) })} placeholder="Texto do botão" />
+              <Input value={button.type === "cta_url" ? button.url ?? "" : button.type === "cta_copy" ? button.copyCode ?? "" : button.type === "cta_call" ? button.phoneNumber ?? "" : button.id ?? ""} onChange={(e) => setForm({ ...form, buttons: form.buttons.map((item, i) => i === index ? { ...item, ...(button.type === "cta_url" ? { url: e.target.value } : button.type === "cta_copy" ? { copyCode: e.target.value } : button.type === "cta_call" ? { phoneNumber: e.target.value } : { id: e.target.value }) } : item) })} placeholder={button.type === "cta_url" ? "https://..." : button.type === "cta_call" ? "Telefone" : button.type === "cta_copy" ? "Código" : "ID da resposta"} />
+              <Button type="button" variant="ghost" size="icon" onClick={() => setForm({ ...form, buttons: form.buttons.filter((_, i) => i !== index) })}><Trash2 className="h-4 w-4" /></Button>
+            </div>)}</div>}
+
+          {form.kind === "list" && <div className="space-y-3"><div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label>Texto do botão da lista</Label><Input value={form.buttonText} onChange={(e) => setForm({ ...form, buttonText: e.target.value })} disabled={form.listMode === "classic"} /></div><div className="space-y-2"><Label>Compatibilidade</Label><select className="h-9 w-full rounded-md border bg-card px-3 text-sm" value={form.listMode} onChange={(e) => setForm({ ...form, listMode: e.target.value as "classic" | "native" })}><option value="classic">Texto com opções (recomendado)</option><option value="native">Lista interativa (experimental)</option></select></div></div>{form.listMode === "classic" && <p className="text-xs text-muted-foreground">O modo compatível evita o erro 405 em versões que não aceitam listas nativas.</p>}<div className="flex items-center justify-between"><Label>Opções</Label><Button type="button" variant="outline" size="sm" onClick={() => setForm({ ...form, rows: [...form.rows, { id: `opcao_${form.rows.length + 1}`, title: "Nova opção", description: "" }] })}>Adicionar</Button></div>
+            {form.rows.map((row, index) => <div key={index} className="grid gap-2 rounded-xl border bg-muted/30 p-3 sm:grid-cols-[1fr_1fr_1.4fr_auto]"><Input value={row.id} onChange={(e) => setForm({ ...form, rows: form.rows.map((item, i) => i === index ? { ...item, id: e.target.value } : item) })} placeholder="ID" /><Input value={row.title} onChange={(e) => setForm({ ...form, rows: form.rows.map((item, i) => i === index ? { ...item, title: e.target.value } : item) })} placeholder="Título" /><Input value={row.description ?? ""} onChange={(e) => setForm({ ...form, rows: form.rows.map((item, i) => i === index ? { ...item, description: e.target.value } : item) })} placeholder="Descrição" /><Button type="button" variant="ghost" size="icon" onClick={() => setForm({ ...form, rows: form.rows.filter((_, i) => i !== index) })}><Trash2 className="h-4 w-4" /></Button></div>)}</div>}
           <div className="grid gap-4 sm:grid-cols-3"><div className="space-y-2"><Label>Intervalo mínimo (s)</Label><Input type="number" min={1} value={form.delaySeconds} onChange={(e) => setForm({ ...form, delaySeconds: Number(e.target.value) })} /></div><div className="space-y-2"><Label>Variação aleatória (s)</Label><Input type="number" min={0} max={60} value={form.jitterSeconds} onChange={(e) => setForm({ ...form, jitterSeconds: Number(e.target.value) })} /></div><div className="flex items-center gap-3 rounded-xl border px-4 py-3"><Switch checked={form.active} onCheckedChange={(active) => setForm({ ...form, active })} aria-label="Modelo ativo" /><div><p className="text-sm font-medium">Modelo ativo</p><p className="text-xs text-muted-foreground">Pode receber envios</p></div></div></div>
           <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => setForm(emptyForm)}><Plus /> Novo</Button><Button onClick={() => void save()} disabled={saving}>{saving ? <Loader2 className="animate-spin" /> : <Save />} Salvar modelo</Button></div>
         </CardContent>

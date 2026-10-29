@@ -1,5 +1,5 @@
 import { apiGet, apiPost, apiPut } from "@/lib/api";
-import type { CampaignContent, MessageKind } from "@/services/campaigns";
+import type { CampaignContent } from "@/services/campaigns";
 
 export interface MessageTemplate {
   id: string;
@@ -29,11 +29,7 @@ export type TemplateInput = {
   active: boolean;
   delayMs: number;
   jitterMs: number;
-  content: {
-    kind: MessageKind;
-    body: string;
-    variants: string[];
-  };
+  content: CampaignContent;
 };
 
 export const listMessageTemplates = () =>
