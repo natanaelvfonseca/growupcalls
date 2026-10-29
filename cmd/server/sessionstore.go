@@ -159,6 +159,42 @@ func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
 	}
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS chatwoot_outbox_due ON chatwoot_outbox (dead, next_at)`)
 
+	// Modelos reutilizáveis e auditoria dos webhooks de entrada. O event_id é
+	// idempotente por origem: repetir o mesmo webhook nunca cria outro disparo.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS message_templates (
+		id         TEXT PRIMARY KEY,
+		name       TEXT NOT NULL,
+		content    JSONB NOT NULL,
+		delay_ms   INT NOT NULL DEFAULT 3000,
+		jitter_ms  INT NOT NULL DEFAULT 1000,
+		active     BOOLEAN NOT NULL DEFAULT true,
+		created_at BIGINT NOT NULL,
+		updated_at BIGINT NOT NULL
+	)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS integration_dispatches (
+		source          TEXT NOT NULL,
+		event_id        TEXT NOT NULL,
+		template_id     TEXT NOT NULL,
+		status          TEXT NOT NULL,
+		recipient_count INT NOT NULL DEFAULT 0,
+		jobs            JSONB NOT NULL DEFAULT '[]'::jsonb,
+		last_error      TEXT,
+		created_at      BIGINT NOT NULL,
+		updated_at      BIGINT NOT NULL,
+		PRIMARY KEY (source, event_id)
+	)`); err != nil {
+		return nil, err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS integration_dispatches_created ON integration_dispatches (source, created_at DESC)`)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS dispatch_cursors (
+		source        TEXT PRIMARY KEY,
+		next_position BIGINT NOT NULL DEFAULT 0
+	)`); err != nil {
+		return nil, err
+	}
+
 	return &sessionStore{db: db}, nil
 }
 

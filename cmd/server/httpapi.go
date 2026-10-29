@@ -25,6 +25,12 @@ func (s *server) routes() http.Handler {
 	// = token efêmero escopado por conta (recomendado).
 	mux.HandleFunc("GET /api/widget-key", s.handleWidgetKey)
 	mux.HandleFunc("POST /api/widget-tokens", s.handleWidgetToken)
+	// Modelos persistentes + entrada idempotente do sistema Jovem Aprendiz.
+	mux.HandleFunc("GET /api/message-templates", s.handleMessageTemplateList)
+	mux.HandleFunc("GET /api/message-templates/{id}", s.handleMessageTemplateGet)
+	mux.HandleFunc("PUT /api/message-templates/{id}", s.handleMessageTemplatePut)
+	mux.HandleFunc("POST /api/integrations/jovem-aprendiz/webhook", s.handleJovemAprendizWebhook)
+	mux.HandleFunc("GET /api/integrations/jovem-aprendiz/dispatches/{eventId}", s.handleJovemAprendizDispatchGet)
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
 	mux.HandleFunc("GET /api/sessions/{sid}/calls", s.handleSessionCalls)

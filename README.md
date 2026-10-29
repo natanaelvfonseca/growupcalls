@@ -333,10 +333,64 @@ Todas as rotas são escopadas por sessão (`/api/sessions/{sid}/…`). Os evento
 | **Contatos / grupos / canais** | `GET /contacts`, `/contacts/check`, `/contacts/{jid}`, `/picture`, `/business`, `/block`, `/unblock`, `GET /blocklist`; `GET/POST /groups`, `/groups/{gid}/…` (participantes, convite, pedidos, configurações, foto, assunto, descrição, sair; `POST /groups/{gid}/history/share` e `shareHistory` no add: compartilhar o histórico recente com quem entrou); `GET/POST /communities`, `/communities/{cid}` (+ grupos), `/communities/{cid}/groups` (listar/criar), `/groups/link`, `/groups/unlink`, `/participants` (+ `/participants/add`); `GET /channels`, `/channels/{id}/…` (seguir, mutar, mensagens) |
 | **Chats / perfil / privacidade** | `GET /chats`, `/chats/{chatId}/messages`, `PUT /chats/{chatId}/disappearing`, `PUT /disappearing`; `GET /profile`, `/profile/qr`, `PUT /profile/status`; `GET/PUT /privacy`, `GET /privacy/status` |
 | **Webhooks** | `GET/POST/DELETE /webhook` (eventos, `secret` HMAC), `GET /webhooks/status`, `/webhooks/dlq`, `POST /webhooks/dlq/{id}/replay`, `/webhooks/reenable` |
+| **Integrações de disparo** | `GET/PUT /api/message-templates/{id}`, `GET /api/message-templates`, `POST /api/integrations/jovem-aprendiz/webhook`, `GET /api/integrations/jovem-aprendiz/dispatches/{eventId}` |
 | **Chatwoot** | `GET/POST/DELETE /chatwoot`, `POST /chatwoot/webhook`, `/chatwoot/import-history`, `/chatwoot/groups/{gid}/open`, `/chatwoot/channels/{id}/open`, `GET /api/chatwoot/resolve` |
 | **SIP** | `GET /api/sip/status`, `GET/POST /sip` (credenciais p/ o PBX registrar aqui), `GET/POST /sip-ext` (registrar num PBX externo: host, porta, usuário, senha, ramal, proxy) |
 | **Widget / formulários** | `GET /api/widget-key`, `POST /api/widget-tokens`, `GET /forms/{token}`, `POST /forms/{token}/submit` (públicas, token como capability) |
 | **Infra** | `GET /api/config` (flags, versão, commit), `GET /livez`, `/readyz`, `/metrics`, `GET /recordings/{id}` |
+
+---
+
+### Webhook do Jovem Aprendiz
+
+O GrowupCalls mantém a regra de entrega no próprio motor: modelos persistentes,
+idempotência por evento, variáveis, deduplicação dos telefones e rodízio entre os
+números conectados. O n8n pode chamar a rota, mas não precisa controlar a fila.
+
+Crie ou atualize um modelo (todas as rotas abaixo usam `X-API-Key`):
+
+```http
+PUT /api/message-templates/primeiro-contato
+Content-Type: application/json
+
+{
+  "name": "Primeiro contato",
+  "active": true,
+  "delayMs": 5000,
+  "jitterMs": 2000,
+  "content": {
+    "kind": "text",
+    "variants": [
+      "Olá {{nome}}, podemos falar sobre o programa {{programa}}?",
+      "Oi {{nome}}! Tenho informações sobre o programa {{programa}}. Posso te enviar?"
+    ]
+  }
+}
+```
+
+Depois, envie o evento. `telefone` e `telefone_2` geram mensagens separadas; um
+número repetido é enviado apenas uma vez. Também são aceitos `phones`, `phone`,
+`phone_2` e os mesmos campos dentro de `aluno`, `student` ou `data`.
+
+```http
+POST /api/integrations/jovem-aprendiz/webhook
+Content-Type: application/json
+
+{
+  "event_id": "matricula-84721",
+  "template_id": "primeiro-contato",
+  "aluno": {
+    "nome": "Ana",
+    "programa": "Jovem Aprendiz",
+    "telefone": "5547999991111",
+    "telefone_2": "5547999992222"
+  }
+}
+```
+
+Repetir o mesmo `event_id` devolve o registro existente e não dispara novamente.
+O resultado pode ser consultado em
+`GET /api/integrations/jovem-aprendiz/dispatches/matricula-84721`.
 
 ---
 
