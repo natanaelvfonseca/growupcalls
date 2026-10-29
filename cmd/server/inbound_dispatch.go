@@ -484,7 +484,7 @@ func (s *server) handleJovemAprendizWebhook(w http.ResponseWriter, r *http.Reque
 		}
 		body := template.Content.Body
 		if len(template.Content.Variants) > 0 {
-			body = template.Content.Variants[i%len(template.Content.Variants)]
+			body = template.Content.Variants[(int(start)+i)%len(template.Content.Variants)]
 		}
 		vars["__growup_body"] = renderCampaignTemplate(body, vars)
 		g.recipients = append(g.recipients, CampaignRecipient{Phone: phone, Variables: vars})
