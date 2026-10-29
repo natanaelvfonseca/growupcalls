@@ -52,7 +52,7 @@ func main() {
 	debug := flag.Bool("debug", false, "verbose logging")
 	// Padrão vem da env GROWUPCALLS_MAX_CALLS (fácil de editar na stack do Portainer);
 	// a flag -max-calls-per-session ainda sobrescreve se passada.
-	maxCalls := flag.Int("max-calls-per-session", envInt("GROWUPCALLS_MAX_CALLS", 8), "max concurrent calls per session (0 = unlimited)")
+	maxCalls := flag.Int("max-calls-per-session", envInt("GROWUPCALLS_MAX_CALLS", 5), "max concurrent calls per session (0 = unlimited)")
 	flag.Parse()
 
 	level := slog.LevelInfo

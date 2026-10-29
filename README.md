@@ -264,7 +264,7 @@ npm run dev      # Vite na :5173, faz proxy de /api → http://localhost:8080
 | `GROWUPCALLS_PUBLIC_IP` | — | IP público p/ NAT 1:1 / ICE-TCP / SDP do SIP. `auto` descobre o IP real mesmo dentro do Docker/NAT de nuvem (interface pública → STUN → HTTPS); o IP achado e a fonte aparecem em `GET /api/config` (`publicIp`, `publicIpSource`) |
 | `GROWUPCALLS_UDP_PORT` | — | Porta de mídia WebRTC (UDP + ICE-TCP) |
 | `GROWUPCALLS_DEFAULT_TRANSPORT` | `auto` | Transporte de áudio do navegador: `auto` (WebRTC → fallback WS), `webrtc`, `websocket` |
-| `GROWUPCALLS_MAX_CALLS` | `8` | Equivalente a `-max-calls-per-session` |
+| `GROWUPCALLS_MAX_CALLS` | `5` | Equivalente a `-max-calls-per-session` |
 | `GROWUPCALLS_RING_TIMEOUT_SECONDS` | — | Expira chamada recebida que nunca é encerrada |
 | `GROWUPCALLS_RECORDING_DIR` | `$TMPDIR/growupcalls-recordings` | Onde ficam os MP3s (retenção ~48h) |
 | `GROWUPCALLS_PUBLIC_BASE_URL` | — | Base pública p/ URLs de gravação, formulários e widget (ex.: `https://call.seudominio.com`) |
