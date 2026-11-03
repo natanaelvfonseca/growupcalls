@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"growupcalls/internal/voip/core"
 )
 
 // wsBridge é a ponte de áudio por WebSocket da chamada: transporte alternativo ao
@@ -204,9 +203,11 @@ func (s *server) handleWSBridge(w http.ResponseWriter, r *http.Request) {
 		ac.spies.feed(spySideAgent, pcm16)
 		ac.cm.FeedCapturedPCM(pcm16)
 	}
-	bridge.OnTerminalWS = func() {
-		go sess.terminateCall(callID, core.EndCallReasonUserEnded)
-	}
+	// O transporte de áudio não é o ciclo de vida da chamada. Recarregar a
+	// página, trocar de aba ou perder a rede por alguns segundos fecha o socket,
+	// mas não pode desligar o cliente no WhatsApp. O encerramento continua sendo
+	// feito pela rota DELETE da chamada (ou pelo evento remoto do WhatsApp).
+	bridge.OnTerminalWS = func() {}
 
 	// Registra o bridge WebSocket na chamada (fecha um transporte anterior se havia).
 	// Sem codec Opus: o downlink sai por WritePCM (ver Session.OnPeerAudio).
