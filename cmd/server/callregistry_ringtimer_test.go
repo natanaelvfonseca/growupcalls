@@ -61,3 +61,33 @@ func TestSetRingTimerOnMissingCallStopsIt(t *testing.T) {
 	case <-time.After(80 * time.Millisecond):
 	}
 }
+
+
+// O WhatsApp pode confirmar o atendimento antes de StartCall retornar;
+// nesse caso, instalar o timer de saída não pode criar uma bomba-relógio.
+func TestSetRingTimerAfterAnsweredDoesNotFire(t *testing.T) {
+	r := newCallRegistry()
+	ac := &activeCall{outgoing: true}
+	ac.answered.Store(true)
+	r.add("answered-outbound", ac)
+	fired := make(chan struct{}, 1)
+	timer := time.AfterFunc(40*time.Millisecond, func() { fired <- struct{}{} })
+	r.setRingTimer("answered-outbound", timer)
+	select {
+	case <-fired:
+		t.Fatal("chamada atendida recebeu timeout após o accept")
+	case <-time.After(90 * time.Millisecond):
+	}
+	if n := r.count(); n != 1 {
+		t.Fatalf("a chamada atendida deveria permanecer, got %d", n)
+	}
+}
+
+func TestRingTimeoutForCallUsesDirection(t *testing.T) {
+	if got := ringTimeoutForCall(&activeCall{outgoing: true}); got != outboundRingTimeoutSecs {
+		t.Fatalf("outbound timeout got %d, want %d", got, outboundRingTimeoutSecs)
+	}
+	if got := ringTimeoutForCall(&activeCall{outgoing: false}); got != ringTimeoutSecs {
+		t.Fatalf("inbound timeout got %d, want %d", got, ringTimeoutSecs)
+	}
+}

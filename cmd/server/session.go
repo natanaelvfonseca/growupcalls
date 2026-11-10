@@ -443,10 +443,10 @@ func (s *Session) runPresenceKeepalive() {
 
 // createCall monta a chamada. record liga a gravação nesta chamada específica —
 // o chamador combina o opt-in por sessão (getRecording) com o flag por chamada.
-func (s *Session) createCall(callID string, record bool) *call.CallManager {
+func (s *Session) createCall(callID string, record bool, outgoing bool) *call.CallManager {
 	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
 	s.wireCall(cm, callID)
-	ac := &activeCall{cm: cm, spies: newSpyHub()}
+	ac := &activeCall{cm: cm, spies: newSpyHub(), outgoing: outgoing}
 	ac.spies.OnChange = func(n int) { s.mgr.broker.emitCallSpy(s.id, callID, n) }
 	if record {
 		ac.recorder = newCallRecorder(callID, s.log, time.Now())
@@ -605,11 +605,15 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo, record bool) (string, error) {
 	callID := signaling.GenerateCallID()
 	// grava se a sessão está em modo gravação OU se esta chamada pediu (flag record)
-	cm := s.createCall(callID, record || s.getRecording())
+	cm := s.createCall(callID, record || s.getRecording(), true)
 	if err := cm.StartCall(ctx, callID, peer, isVideo); err != nil {
 		s.removeCall(callID)
 		return "", err
 	}
+	// Chamadas de saída também precisam expirar se o WhatsApp nunca emitir
+	// um evento final. Sem este timer, cada ligação órfã ocupa um slot
+	// permanentemente e a discadora começa a receber 429 max concurrent calls.
+	s.armRingTimeout(callID, outboundRingTimeoutSecs)
 	return callID, nil
 }
 
@@ -636,6 +640,11 @@ func (s *Session) callForEvent(from types.JID, data *waBinary.Node) (*activeCall
 // só um restart do processo liberava. 0 desliga o timeout.
 var ringTimeoutSecs = envInt("GROWUPCALLS_RING_TIMEOUT_SECONDS", 60)
 
+// Teto distinto para chamadas originadas: permite a janela normal de toque
+// antes de encerrar uma tentativa sem resposta e sem evento de término.
+// Não limita a duração de chamadas atendidas (o timer é cancelado no accept).
+var outboundRingTimeoutSecs = envInt("GROWUPCALLS_OUTBOUND_RING_TIMEOUT_SECONDS", 90)
+
 func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	node := wrapCall(evt.From, evt.Data)
 	callID := callIDFromNode(node)
@@ -654,7 +663,7 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		s.rejectOffer(ctx, node, evt.From)
 		return
 	}
-	cm := s.createCall(callID, s.getRecording())
+	cm := s.createCall(callID, s.getRecording(), false)
 	// telefone real do chamador: o offer traz caller_pn em CallCreatorAlt quando o
 	// creator é LID; ou o próprio CallCreator já é PN. Evita "desconhecido" sem
 	// depender do mapa local de LID (bug 01/10).
@@ -665,17 +674,17 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		callerPn = evt.CallCreatorAlt.User
 	}
 	cm.HandleCallOffer(ctx, node, evt.From, callerPn)
-	s.armRingTimeout(callID)
+	s.armRingTimeout(callID, ringTimeoutSecs)
 }
 
 // armRingTimeout agenda a expiração da chamada tocando (ver ringTimeoutSecs). É
 // cancelado quando a chamada é atendida (OnStateChange ativo) ou encerra
 // (removeCall/drain param o timer).
-func (s *Session) armRingTimeout(callID string) {
-	if ringTimeoutSecs <= 0 {
+func (s *Session) armRingTimeout(callID string, seconds int) {
+	if seconds <= 0 {
 		return
 	}
-	t := time.AfterFunc(time.Duration(ringTimeoutSecs)*time.Second, func() {
+	t := time.AfterFunc(time.Duration(seconds)*time.Second, func() {
 		s.expireRingingCall(callID)
 	})
 	s.reg.setRingTimer(callID, t)
@@ -684,6 +693,13 @@ func (s *Session) armRingTimeout(callID string) {
 // expireRingingCall encerra uma chamada que ficou tocando além do timeout sem
 // nunca ter sido atendida nem recebido encerramento. Recusa no WhatsApp, avisa
 // TODOS os assinantes (call-ended) e libera a vaga.
+func ringTimeoutForCall(ac *activeCall) int {
+	if ac.outgoing {
+		return outboundRingTimeoutSecs
+	}
+	return ringTimeoutSecs
+}
+
 func (s *Session) expireRingingCall(callID string) {
 	ac, ok := s.reg.get(callID)
 	if !ok {
@@ -693,8 +709,20 @@ func (s *Session) expireRingingCall(callID string) {
 		return // atendida (corrida com o timer): não expira
 	}
 	s.log.Info("chamada expirada por timeout de toque (nunca recebeu encerramento do WhatsApp)",
-		"call_id", callID, "timeout_s", ringTimeoutSecs)
-	_ = ac.cm.RejectCall(s.mgr.appCtx, callID, core.EndCallReasonTimeout)
+		"call_id", callID, "timeout_s", ringTimeoutForCall(ac), "outgoing", ac.outgoing)
+	if ac.outgoing {
+		// A checagem de "ainda tocando" e o encerramento são atômicos no
+		// CallManager: se o accept chegou junto com o timeout, não desliga.
+		ended, err := ac.cm.EndCallIfRinging(s.mgr.appCtx, core.EndCallReasonTimeout)
+		if err != nil {
+			s.log.Warn("outbound ring timeout falhou", "call_id", callID, "error", err)
+		}
+		if !ended {
+			return
+		}
+	} else {
+		_ = ac.cm.RejectCall(s.mgr.appCtx, callID, core.EndCallReasonTimeout)
+	}
 	s.removeCall(callID)
 	s.mgr.broker.endCall(callID, string(core.EndCallReasonTimeout))
 }

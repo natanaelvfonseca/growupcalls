@@ -266,6 +266,33 @@ func (m *CallManager) RejectCall(ctx context.Context, callID string, reason core
 	return nil
 }
 
+// EndCallIfRinging encerra atomicamente SOMENTE uma chamada ainda tocando.
+// O timeout de discagem não pode interromper uma chamada aceita entre o
+// callback do timer e o sinal de terminação. A checagem e a transição são
+// protegidas pelo mesmo mutex usado pelo accept do WhatsApp.
+func (m *CallManager) EndCallIfRinging(ctx context.Context, reason core.EndCallReason) (bool, error) {
+	m.mu.Lock()
+	c := m.currentCall
+	if c == nil || !c.IsRinging() {
+		m.mu.Unlock()
+		return false, nil
+	}
+	if err := c.ApplyTransition(Transition{Type: TransitionTerminated, Reason: reason}); err != nil {
+		m.mu.Unlock()
+		return false, err
+	}
+	node := signaling.BuildTerminateStanza(wanode.MustJID(c.PeerJid), c.CallID, wanode.MustJID(c.CallCreator))
+	m.emitState()
+	m.mu.Unlock()
+
+	go func() { _, _ = m.sock.Query(ctx, node) }()
+	if m.OnEnded != nil {
+		m.OnEnded(c)
+	}
+	m.cleanupMedia()
+	return true, nil
+}
+
 func (m *CallManager) EndCall(ctx context.Context, reason core.EndCallReason) error {
 	m.mu.Lock()
 	call := m.currentCall

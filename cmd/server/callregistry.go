@@ -19,6 +19,7 @@ type activeCall struct {
 	peerAudioN  uint64        // diagnóstico: nº de frames de áudio do peer (WhatsApp) recebidos
 	ringTimer   *time.Timer   // timeout de toque: expira a chamada que nunca recebe encerramento
 	answered    atomic.Bool   // marca que a chamada ficou ativa (atendida) — não expirar
+	outgoing    bool          // saída exige terminate no timeout; entrada exige reject
 	spies       *spyHub       // espiões (escuta em tempo real do mix dos dois lados); ver spy.go
 	volumeMilli atomic.Int32  // ganho do áudio interlocutor→atendente, em milésimos +1 (0 = não ajustado = 1.0)
 	silenced    atomic.Bool   // toque silenciado na tela (o celular continua tocando)
@@ -65,10 +66,12 @@ func (r *callRegistry) remove(callID string) (*activeCall, bool) {
 func (r *callRegistry) setRingTimer(callID string, t *time.Timer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ac, ok := r.calls[callID]; ok {
+	if ac, ok := r.calls[callID]; ok && !ac.answered.Load() {
 		ac.ringTimer = t
 		return
 	}
+	// Um accept pode chegar durante StartCall, antes de instalar o timer.
+	// Nunca programe expiração numa chamada que já foi atendida.
 	t.Stop()
 }
 
