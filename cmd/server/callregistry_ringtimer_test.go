@@ -62,7 +62,6 @@ func TestSetRingTimerOnMissingCallStopsIt(t *testing.T) {
 	}
 }
 
-
 // O WhatsApp pode confirmar o atendimento antes de StartCall retornar;
 // nesse caso, instalar o timer de saída não pode criar uma bomba-relógio.
 func TestSetRingTimerAfterAnsweredDoesNotFire(t *testing.T) {
